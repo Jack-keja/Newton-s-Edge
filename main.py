@@ -5,7 +5,7 @@ from typing import List, Optional
 
 import pygame
 
-from card_factory import draw_random_card
+from card_factory import build_opening_hand, draw_random_card
 from game_constants import (
     ACCENT_BLUE,
     ACCENT_GOLD,
@@ -66,6 +66,10 @@ class Game:
         self.hand_card_height = 282
         self.end_turn_button = Button(pygame.Rect(1040, 680, 200, 58), "End Turn")
         self.reset_button = Button(pygame.Rect(1040, 612, 200, 50), "Restart Match")
+        self.log_button = Button(pygame.Rect(0, 0, 180, 42), "Battle Log")
+        self.log_prev_button = Button(pygame.Rect(0, 0, 130, 40), "Previous")
+        self.log_next_button = Button(pygame.Rect(0, 0, 130, 40), "Next")
+        self.log_close_button = Button(pygame.Rect(0, 0, 130, 40), "Close")
         self.menu_buttons = {
             "play": Button(pygame.Rect(0, 0, 260, 58), "Play"),
             "instruction": Button(pygame.Rect(0, 0, 260, 58), "Instruction"),
@@ -75,12 +79,13 @@ class Game:
         self.current_screen = "menu"
         self.transition = None
         self.card_images = self.load_card_images()
+        self.card_back_image = self.load_card_back_image()
         self.initialize_match()
 
-    def initialize_match(self) -> None:
+    def initialize_match(self, animated_setup: bool = False) -> None:
         self.players = [
-            Player(name="Player 1", position=START_POSITIONS[0]),
-            Player(name="Player 2", position=START_POSITIONS[1]),
+            Player(name="p1", position=START_POSITIONS[0]),
+            Player(name="p2", position=START_POSITIONS[1]),
         ]
         self.current_player_index = 0
         self.round_number = 1
@@ -93,19 +98,28 @@ class Game:
         self.conservation_used_this_turn = False
         self.action_used_this_turn = False
         self.animation = None
+        self.pending_winner = None
+        self.deal_sequence = None
+        self.opening_hands = None
+        self.pending_transition_action = None
         self.card_use_animation = None
         self.drag_state = None
         self.messages = []
+        self.battle_log_pages: List[dict] = []
+        self.log_view_open = False
+        self.log_page_index = 0
+        self.log_scroll_offset = 0
         self.card_rects = []
         self.board_rect = pygame.Rect(0, 0, 0, 0)
-
-        for player in self.players:
-            for _ in range(START_HAND):
-                player.hand.append(draw_random_card())
-
-        self.log("Physics Card Duel begins. Push your rival into the void to win.")
-        self.log("Each turn: gain 2 energy, draw 2 cards, then play effects and one action card.")
-        self.start_turn(initial=True)
+        self.side_order = 1 if self.players[0].position <= self.players[1].position else -1
+        if animated_setup:
+            self.turn_phase = "dealing"
+            self.opening_hands = [build_opening_hand(START_HAND) for _ in self.players]
+            self.pending_transition_action = {"type": "opening_deal"}
+        else:
+            for player in self.players:
+                player.hand.extend(build_opening_hand(START_HAND))
+            self.start_turn(initial=True)
 
     def load_card_images(self) -> dict[str, pygame.Surface]:
         image_dir = os.path.join(os.path.dirname(__file__), "card_image")
@@ -126,10 +140,18 @@ class Game:
                 loaded_images[card_name] = pygame.image.load(image_path).convert_alpha()
         return loaded_images
 
+    def load_card_back_image(self) -> Optional[pygame.Surface]:
+        image_dir = os.path.join(os.path.dirname(__file__), "card_image")
+        for filename in ("back_card.jpg", "back_card.png"):
+            image_path = os.path.join(image_dir, filename)
+            if os.path.exists(image_path):
+                return pygame.image.load(image_path).convert()
+        return None
+
     def begin_game_transition(self) -> None:
         self.transition = {
             "start_ticks": pygame.time.get_ticks(),
-            "duration": 500,
+            "duration": 1100,
         }
         self.current_screen = "game"
 
@@ -139,6 +161,11 @@ class Game:
         elapsed = pygame.time.get_ticks() - self.transition["start_ticks"]
         if elapsed >= self.transition["duration"]:
             self.transition = None
+            if self.pending_transition_action:
+                action = self.pending_transition_action
+                self.pending_transition_action = None
+                if action["type"] == "opening_deal":
+                    self.begin_opening_deal_sequence()
 
     def transition_progress(self) -> float:
         if not self.transition:
@@ -149,6 +176,17 @@ class Game:
     def log(self, message: str) -> None:
         self.messages.append(message)
         self.messages = self.messages[-8:]
+        if not self.battle_log_pages or self.battle_log_pages[-1]["round"] != self.round_number:
+            self.battle_log_pages.append(
+                {
+                    "round": self.round_number,
+                    "title": f"Round {self.round_number}",
+                    "entries": [],
+                }
+            )
+        self.battle_log_pages[-1]["entries"].append(message)
+        if self.log_view_open:
+            self.log_page_index = len(self.battle_log_pages) - 1
 
     def current_player(self) -> Player:
         return self.players[self.current_player_index]
@@ -159,10 +197,160 @@ class Game:
     def other_player(self) -> Player:
         return self.players[self.other_player_index()]
 
-    def arena_geometry(self, rect: pygame.Rect) -> tuple[tuple[int, int], int]:
-        arena_center = (rect.centerx, rect.y + 320)
-        arena_radius = min(228, max(170, (rect.height // 2) - 100))
-        return arena_center, arena_radius
+    def relative_side_order(self) -> int:
+        if self.players[0].position < self.players[1].position:
+            self.side_order = 1
+        elif self.players[0].position > self.players[1].position:
+            self.side_order = -1
+        return self.side_order
+
+    def player_facing_direction(self, player_index: int) -> float:
+        side_order = self.relative_side_order()
+        return float(side_order if player_index == 0 else -side_order)
+
+    def arena_geometry(self, rect: pygame.Rect) -> tuple[tuple[int, int], int, int]:
+        arena_center = (rect.centerx, rect.y + 328)
+        arena_radius_x = min(560, max(450, (rect.width // 2) - 240))
+        arena_radius_y = min(290, max(220, (rect.height // 2) - 150))
+        if self.transition:
+            progress = self.transition_progress()
+            eased = 1.0 - ((1.0 - progress) ** 3)
+            arena_center = (arena_center[0], int(arena_center[1] - 430 * (1.0 - eased)))
+            arena_radius_x = max(180, int(arena_radius_x * (0.58 + 0.42 * eased)))
+            arena_radius_y = max(96, int(arena_radius_y * (0.58 + 0.42 * eased)))
+        return arena_center, arena_radius_x, arena_radius_y
+
+    def arena_ellipse_rect(self, rect: pygame.Rect) -> pygame.Rect:
+        arena_center, arena_radius_x, arena_radius_y = self.arena_geometry(rect)
+        return pygame.Rect(
+            arena_center[0] - arena_radius_x,
+            arena_center[1] - arena_radius_y,
+            arena_radius_x * 2,
+            arena_radius_y * 2,
+        )
+
+    def side_stack_anchor(self, rect: pygame.Rect, player_index: int) -> tuple[int, int]:
+        arena_center, arena_radius_x, _ = self.arena_geometry(rect)
+        offset = arena_radius_x + 136
+        x = arena_center[0] - offset if player_index == 0 else arena_center[0] + offset
+        return x, arena_center[1] + 18
+
+    def deck_anchor(self, rect: pygame.Rect) -> tuple[int, int]:
+        arena_center, _, _ = self.arena_geometry(rect)
+        return arena_center[0], arena_center[1] - 4
+
+    def deal_target_anchor(self, rect: pygame.Rect, player_index: int) -> tuple[int, int]:
+        return self.side_stack_anchor(rect, player_index)
+
+    def begin_deal_sequence(
+        self,
+        player_order: List[int],
+        final_action: str,
+        caption: str,
+        cards: Optional[List[Card]] = None,
+    ) -> None:
+        if self.board_rect.width <= 0:
+            self.board_rect = pygame.Rect(12, 12, SCREEN_WIDTH - 24, SCREEN_HEIGHT - 24)
+        self.deal_sequence = {
+            "phase": "shuffle",
+            "start_ticks": pygame.time.get_ticks(),
+            "shuffle_duration": 900,
+            "card_interval": 150,
+            "travel_duration": 420,
+            "pulse_duration": 300,
+            "player_order": player_order,
+            "cards": cards or [],
+            "next_index": 0,
+            "last_spawn_ticks": 0,
+            "active_cards": [],
+            "pulses": [],
+            "caption": caption,
+            "final_action": final_action,
+        }
+        self.turn_phase = "dealing"
+
+    def begin_opening_deal_sequence(self) -> None:
+        opening_order: List[int] = []
+        opening_cards: List[Card] = []
+        for _ in range(START_HAND):
+            opening_order.extend([0, 1])
+            if self.opening_hands:
+                opening_cards.append(self.opening_hands[0].pop(0))
+                opening_cards.append(self.opening_hands[1].pop(0))
+        self.begin_deal_sequence(
+            opening_order,
+            "opening_complete",
+            "Summoning deck and distributing opening hands",
+            cards=opening_cards,
+        )
+
+    def complete_deal_sequence(self) -> None:
+        if not self.deal_sequence:
+            return
+        final_action = self.deal_sequence["final_action"]
+        self.deal_sequence = None
+        if final_action == "opening_complete":
+            self.start_turn(initial=True)
+        elif final_action == "round_draw_complete":
+            self.turn_phase = "playing"
+
+    def update_deal_sequence(self) -> None:
+        if not self.deal_sequence:
+            return
+
+        now = pygame.time.get_ticks()
+        sequence = self.deal_sequence
+        if sequence["phase"] == "shuffle":
+            if now - sequence["start_ticks"] >= sequence["shuffle_duration"]:
+                sequence["phase"] = "deal"
+                sequence["last_spawn_ticks"] = now - sequence["card_interval"]
+            return
+
+        while (
+            sequence["next_index"] < len(sequence["player_order"])
+            and now - sequence["last_spawn_ticks"] >= sequence["card_interval"]
+        ):
+            player_index = sequence["player_order"][sequence["next_index"]]
+            predetermined_cards = sequence["cards"]
+            card = predetermined_cards.pop(0) if predetermined_cards else draw_random_card()
+            sequence["next_index"] += 1
+            sequence["last_spawn_ticks"] += sequence["card_interval"]
+            sequence["active_cards"].append(
+                {
+                    "player_index": player_index,
+                    "card": card,
+                    "start_ticks": now,
+                }
+            )
+
+        remaining_cards = []
+        for moving_card in sequence["active_cards"]:
+            if now - moving_card["start_ticks"] >= sequence["travel_duration"]:
+                player = self.players[moving_card["player_index"]]
+                if len(player.hand) < MAX_HAND_SIZE:
+                    player.hand.append(moving_card["card"])
+                sequence["pulses"].append(
+                    {
+                        "player_index": moving_card["player_index"],
+                        "start_ticks": now,
+                    }
+                )
+            else:
+                remaining_cards.append(moving_card)
+        sequence["active_cards"] = remaining_cards
+
+        sequence["pulses"] = [
+            pulse
+            for pulse in sequence["pulses"]
+            if now - pulse["start_ticks"] < sequence["pulse_duration"]
+        ]
+
+        if (
+            sequence["next_index"] >= len(sequence["player_order"])
+            and not sequence["active_cards"]
+            and not sequence["pulses"]
+        ):
+            self.complete_deal_sequence()
 
     def start_turn(self, initial: bool = False) -> None:
         player = self.current_player()
@@ -174,7 +362,6 @@ class Game:
 
         if not player.has_started_turn:
             player.has_started_turn = True
-            self.log(f"{player.name} takes an opening turn with {player.energy} energy and {len(player.hand)} cards.")
             return
 
         if not initial:
@@ -183,11 +370,30 @@ class Game:
                 self.log(f"{player.name}'s prepared dodge fades because no shove came last round.")
             gained = min(ENERGY_PER_TURN, MAX_ENERGY - player.energy)
             player.energy += gained
-            draws = max(0, min(DRAW_PER_TURN, MAX_HAND_SIZE - len(player.hand)))
-            for _ in range(draws):
-                player.hand.append(draw_random_card())
+            current_draws = max(0, min(DRAW_PER_TURN, MAX_HAND_SIZE - len(player.hand)))
+            other_player = self.other_player()
+            other_draws = max(0, min(DRAW_PER_TURN, MAX_HAND_SIZE - len(other_player.hand)))
             self.resolve_delayed_energy(player)
-            self.log(f"Round {self.round_number}: {player.name} gains {gained} energy and draws {draws} cards.")
+            self.log(
+                f"Round {self.round_number}: {player.name} gains {gained} energy. "
+                f"Cards are dealt to both players."
+            )
+            deal_order: List[int] = []
+            for _ in range(max(current_draws, other_draws)):
+                if current_draws > 0:
+                    deal_order.append(self.current_player_index)
+                    current_draws -= 1
+                if other_draws > 0:
+                    deal_order.append(self.other_player_index())
+                    other_draws -= 1
+            if deal_order:
+                self.begin_deal_sequence(
+                    deal_order,
+                    "round_draw_complete",
+                    "Distributing round cards to both players",
+                )
+            else:
+                self.turn_phase = "playing"
 
     def resolve_delayed_energy(self, player: Player) -> None:
         updated: List[PendingRestore] = []
@@ -205,7 +411,14 @@ class Game:
             self.log(f"{player.name} regains {actual} delayed energy from Conservation of Energy.")
 
     def can_play(self, player: Player, card: Card) -> bool:
-        if self.animation or self.card_use_animation or self.winner is not None or self.turn_phase != "playing":
+        if (
+            self.log_view_open
+            or self.animation
+            or self.deal_sequence
+            or self.card_use_animation
+            or self.winner is not None
+            or self.turn_phase != "playing"
+        ):
             return False
         if player.energy < card.energy_cost:
             return False
@@ -222,12 +435,12 @@ class Game:
         return player.hand.pop(index)
 
     def play_selected_card(self) -> None:
-        if self.selected_card_index is None or self.animation or self.card_use_animation or self.winner is not None:
+        if self.selected_card_index is None or self.log_view_open or self.animation or self.card_use_animation or self.winner is not None:
             return
         self.play_card_by_index(self.selected_card_index)
 
     def play_card_by_index(self, index: int) -> None:
-        if self.animation or self.card_use_animation or self.winner is not None:
+        if self.log_view_open or self.animation or self.card_use_animation or self.winner is not None:
             return
         player = self.current_player()
         if index >= len(player.hand):
@@ -281,15 +494,17 @@ class Game:
             f"{target.name} will recover 3 energy in 3 turns."
         )
 
-    def attack_direction(self, attacker: Player, defender: Player) -> float:
+    def attack_direction(self, attacker_index: int, defender_index: int) -> float:
+        attacker = self.players[attacker_index]
+        defender = self.players[defender_index]
         if math.isclose(attacker.position, defender.position, abs_tol=0.01):
-            return 1.0 if self.current_player_index == 0 else -1.0
+            return self.player_facing_direction(attacker_index)
         return 1.0 if defender.position > attacker.position else -1.0
 
     def resolve_force_card(self, card: Card) -> None:
         attacker = self.current_player()
         defender = self.other_player()
-        direction = self.attack_direction(attacker, defender)
+        direction = self.attack_direction(self.current_player_index, self.other_player_index())
         if direction > 0:
             attacker.position = min(attacker.position if defender.position <= attacker.position else defender.position - PUSH_CONTACT_GAP, STAGE_LENGTH)
         else:
@@ -300,7 +515,7 @@ class Game:
     def resolve_force_impact(self, card: Card) -> None:
         attacker = self.current_player()
         defender = self.other_player()
-        direction = self.attack_direction(attacker, defender)
+        direction = self.attack_direction(self.current_player_index, self.other_player_index())
 
         if defender.dodge_ready:
             defender.dodge_ready = False
@@ -408,6 +623,30 @@ class Game:
         now = pygame.time.get_ticks()
         elapsed = (now - self.animation["start_ticks"]) / 1000.0
 
+        if self.animation["type"] == "fall":
+            duration = self.animation["duration"]
+            if elapsed < duration:
+                return
+            self.winner = self.animation["winner_index"]
+            self.pending_winner = None
+            self.log(f"{self.players[self.winner].name} wins the duel.")
+            self.animation = {
+                "type": "victory",
+                "winner_index": self.winner,
+                "loser_index": self.animation["player_index"],
+                "duration": 2.6,
+                "start_ticks": pygame.time.get_ticks(),
+                "label": "Victory cutscene",
+            }
+            self.turn_phase = "game_over"
+            return
+
+        if self.animation["type"] == "victory":
+            if elapsed < self.animation["duration"]:
+                return
+            self.animation = None
+            return
+
         if self.animation["type"] == "dodge":
             duration = self.animation["duration"]
             if elapsed < duration:
@@ -446,6 +685,8 @@ class Game:
         moved = self.animation
         self.animation = None
         self.check_winner()
+        if self.animation and self.animation["type"] == "fall":
+            return
         if self.winner is None and moved.get("followup"):
             followup = moved["followup"]
             target_player = self.players[followup["target_player_index"]]
@@ -461,6 +702,8 @@ class Game:
             start_position = current_player.position
             current_player.position = target_position
             self.check_winner()
+            if self.animation and self.animation["type"] == "fall":
+                return
             if self.winner is None:
                 meters = abs(target_position - start_position)
                 self.log(f"{current_player.name} follows up {meters:.2f}m.")
@@ -476,12 +719,25 @@ class Game:
         self.turn_phase = "turn_complete"
 
     def check_winner(self) -> None:
+        if self.winner is not None or (self.animation and self.animation.get("type") == "fall"):
+            return
         for index, player in enumerate(self.players):
             if player.position < 0 or player.position > STAGE_LENGTH:
-                self.winner = 1 - index
+                fell_left = player.position < 0
+                player.position = 0.0 if fell_left else STAGE_LENGTH
+                self.pending_winner = 1 - index
                 self.turn_phase = "game_over"
+                self.animation = {
+                    "type": "fall",
+                    "player_index": index,
+                    "winner_index": self.pending_winner,
+                    "duration": 0.95,
+                    "drop_distance": 300,
+                    "drift": -56 if fell_left else 56,
+                    "label": "Void fall",
+                    "start_ticks": pygame.time.get_ticks(),
+                }
                 self.log(f"{player.name} falls into the void.")
-                self.log(f"{self.players[self.winner].name} wins the duel.")
                 break
 
     def end_turn(self) -> None:
@@ -509,9 +765,36 @@ class Game:
     def restart(self) -> None:
         self.initialize_match()
 
+    def open_log_view(self) -> None:
+        self.log_view_open = True
+        if self.battle_log_pages:
+            self.log_page_index = len(self.battle_log_pages) - 1
+        else:
+            self.log_page_index = 0
+        self.log_scroll_offset = 0
+
+    def close_log_view(self) -> None:
+        self.log_view_open = False
+
+    def change_log_page(self, delta: int) -> None:
+        if not self.battle_log_pages:
+            return
+        self.log_page_index = max(0, min(len(self.battle_log_pages) - 1, self.log_page_index + delta))
+        self.log_scroll_offset = 0
+
+    def current_log_page(self) -> Optional[dict]:
+        if not self.battle_log_pages:
+            return None
+        return self.battle_log_pages[self.log_page_index]
+
+    def scroll_log(self, amount: int) -> None:
+        if not self.log_view_open:
+            return
+        self.log_scroll_offset = max(0, self.log_scroll_offset + amount)
+
     def battlefield_position(self, meters: float, rect: pygame.Rect, player_index: Optional[int] = None) -> tuple[int, int]:
-        (arena_center_x, arena_center_y), arena_radius = self.arena_geometry(rect)
-        x = arena_center_x - arena_radius + (meters / STAGE_LENGTH) * (arena_radius * 2)
+        (arena_center_x, arena_center_y), arena_radius_x, _ = self.arena_geometry(rect)
+        x = arena_center_x - arena_radius_x + (meters / STAGE_LENGTH) * (arena_radius_x * 2)
         y = arena_center_y
 
         if (
@@ -526,11 +809,25 @@ class Game:
             dodge_sign = -1 if player_index == 0 else 1
             y += dodge_sign * arc
 
+        if (
+            player_index is not None
+            and self.animation
+            and self.animation["type"] == "fall"
+            and self.animation["player_index"] == player_index
+        ):
+            elapsed = (pygame.time.get_ticks() - self.animation["start_ticks"]) / 1000.0
+            progress = min(1.0, elapsed / self.animation["duration"])
+            eased = progress * progress
+            x += self.animation["drift"] * eased
+            y += self.animation["drop_distance"] * eased
+
         return int(x), int(y)
 
     def point_in_arena(self, pos: tuple[int, int], rect: pygame.Rect) -> bool:
-        center, radius = self.arena_geometry(rect)
-        return math.hypot(pos[0] - center[0], pos[1] - center[1]) <= radius + 18
+        center, radius_x, radius_y = self.arena_geometry(rect)
+        dx = pos[0] - center[0]
+        dy = pos[1] - center[1]
+        return ((dx * dx) / ((radius_x + 22) ** 2)) + ((dy * dy) / ((radius_y + 22) ** 2)) <= 1.0
 
     def wrap_text(self, text: str, font: pygame.font.Font, max_width: int, max_lines: int) -> List[str]:
         words = text.split()
@@ -588,7 +885,7 @@ class Game:
             return
         card = player.hand[index]
         if self.point_in_arena(mouse_pos, self.board_rect) and self.can_play(player, card):
-            arena_center, _ = self.arena_geometry(self.board_rect)
+            arena_center, _, _ = self.arena_geometry(self.board_rect)
             target_rect = pygame.Rect(0, 0, 164, 152)
             target_rect.center = (arena_center[0], arena_center[1] - 6)
             self.card_use_animation = {
@@ -637,11 +934,186 @@ class Game:
         pygame.draw.rect(panel, border, panel.get_rect(), width=2, border_radius=radius)
         self.screen.blit(panel, rect.topleft)
 
+    def draw_back_card(self, rect: pygame.Rect, angle: float = 0.0, alpha: int = 255) -> None:
+        if self.card_back_image is not None:
+            image = pygame.transform.smoothscale(self.card_back_image, (rect.width, rect.height))
+            if angle:
+                image = pygame.transform.rotate(image, angle)
+            if alpha < 255:
+                image = image.copy()
+                image.set_alpha(alpha)
+            image_rect = image.get_rect(center=rect.center)
+            self.screen.blit(image, image_rect.topleft)
+            return
+
+        fallback = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+        fallback.fill((*CARD_BG, alpha))
+        pygame.draw.rect(fallback, (*CARD_BORDER, alpha), fallback.get_rect(), width=3, border_radius=16)
+        pygame.draw.rect(fallback, (*ACCENT_BLUE, min(255, alpha)), pygame.Rect(10, 12, rect.width - 20, 12), border_radius=6)
+        if angle:
+            fallback = pygame.transform.rotate(fallback, angle)
+        fallback_rect = fallback.get_rect(center=rect.center)
+        self.screen.blit(fallback, fallback_rect.topleft)
+
+    def draw_victory_cutscene(self) -> None:
+        if not self.animation or self.animation["type"] != "victory" or self.winner is None:
+            return
+
+        progress = min(1.0, (pygame.time.get_ticks() - self.animation["start_ticks"]) / (self.animation["duration"] * 1000.0))
+        eased = 1.0 - ((1.0 - progress) ** 3)
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 6, 18, min(170, int(170 * (0.35 + eased * 0.65)))))
+        self.screen.blit(overlay, (0, 0))
+
+        bar_height = int(86 * min(1.0, eased * 1.4))
+        if bar_height > 0:
+            top_bar = pygame.Surface((SCREEN_WIDTH, bar_height), pygame.SRCALPHA)
+            top_bar.fill((2, 12, 30, 235))
+            bottom_bar = pygame.Surface((SCREEN_WIDTH, bar_height), pygame.SRCALPHA)
+            bottom_bar.fill((2, 12, 30, 235))
+            self.screen.blit(top_bar, (0, 0))
+            self.screen.blit(bottom_bar, (0, SCREEN_HEIGHT - bar_height))
+
+        winner = self.players[self.winner]
+        winner_x, winner_y = self.battlefield_position(max(0.0, min(STAGE_LENGTH, winner.position)), self.board_rect, self.winner)
+        spotlight_radius = 88 + int(18 * math.sin(progress * math.pi * 3.0))
+        spotlight_surface = pygame.Surface((spotlight_radius * 2 + 40, spotlight_radius * 2 + 40), pygame.SRCALPHA)
+        center = (spotlight_surface.get_width() // 2, spotlight_surface.get_height() // 2)
+        pygame.draw.circle(spotlight_surface, (*ACCENT_BLUE, 42), center, spotlight_radius + 14)
+        pygame.draw.circle(spotlight_surface, (*ACCENT_GOLD, 120), center, spotlight_radius, 3)
+        pygame.draw.circle(spotlight_surface, (*ACCENT_BLUE, 190), center, spotlight_radius - 18, 2)
+        self.screen.blit(spotlight_surface, (winner_x - center[0], winner_y - center[1]))
+
+        title_y = 120 - int((1.0 - eased) * 40)
+        title = self.hero_font.render("Victory", True, TEXT_COLOR)
+        name = self.title_font.render(f"{winner.name.upper()} controls the arena", True, ACCENT_BLUE)
+        hint = self.small_font.render("Press R or click Restart Match to begin the next duel.", True, MUTED_COLOR)
+        self.screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, title_y)))
+        self.screen.blit(name, name.get_rect(center=(SCREEN_WIDTH // 2, title_y + 58)))
+        self.screen.blit(hint, hint.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 74)))
+
+        subtitle = self.small_font.render("Winning Cutscene", True, ACCENT_GOLD)
+        self.screen.blit(subtitle, subtitle.get_rect(center=(SCREEN_WIDTH // 2, title_y - 36)))
+
+    def draw_side_hand_stacks(self, rect: pygame.Rect) -> None:
+        card_size = (92, 126)
+        now = pygame.time.get_ticks()
+        for player_index, player in enumerate(self.players):
+            anchor_x, anchor_y = self.side_stack_anchor(rect, player_index)
+            is_active = player_index == self.current_player_index and self.winner is None
+            panel_rect = pygame.Rect(0, 0, 124, 182)
+            panel_rect.center = (anchor_x, anchor_y)
+            fill = (12, 34, 74, 205) if is_active else (8, 20, 46, 182)
+            border = ACCENT_BLUE if is_active else CARD_BORDER
+            self.draw_overlay_panel(panel_rect, fill, border, radius=22)
+
+            stack_count = min(4, max(1, len(player.hand))) if player.hand else 0
+            for layer in range(stack_count):
+                offset = layer * 6
+                card_rect = pygame.Rect(
+                    panel_rect.centerx - card_size[0] // 2 + (offset if player_index == 0 else -offset),
+                    panel_rect.y + 26 + layer * 2,
+                    card_size[0],
+                    card_size[1],
+                )
+                self.draw_back_card(card_rect, angle=(-4 + layer * 2) if player_index == 0 else (4 - layer * 2), alpha=220)
+
+            if self.deal_sequence:
+                for pulse in self.deal_sequence["pulses"]:
+                    if pulse["player_index"] != player_index:
+                        continue
+                    progress = min(1.0, (now - pulse["start_ticks"]) / self.deal_sequence["pulse_duration"])
+                    pulse_radius = 18 + int(progress * 32)
+                    pulse_alpha = max(0, 180 - int(progress * 180))
+                    pulse_surface = pygame.Surface((pulse_radius * 2 + 6, pulse_radius * 2 + 6), pygame.SRCALPHA)
+                    pygame.draw.circle(
+                        pulse_surface,
+                        (*ACCENT_BLUE, pulse_alpha),
+                        (pulse_surface.get_width() // 2, pulse_surface.get_height() // 2),
+                        pulse_radius,
+                        3,
+                    )
+                    self.screen.blit(
+                        pulse_surface,
+                        (
+                            panel_rect.centerx - pulse_surface.get_width() // 2,
+                            panel_rect.centery - 10 - pulse_surface.get_height() // 2,
+                        ),
+                    )
+
+            name = self.small_font.render(player.name, True, TEXT_COLOR)
+            count = self.body_font.render(str(len(player.hand)), True, TEXT_COLOR)
+            self.screen.blit(name, name.get_rect(center=(panel_rect.centerx, panel_rect.y + 16)))
+            self.screen.blit(count, count.get_rect(center=(panel_rect.centerx, panel_rect.bottom - 22)))
+
+    def draw_deal_sequence(self, rect: pygame.Rect) -> None:
+        if not self.deal_sequence:
+            return
+
+        sequence = self.deal_sequence
+        now = pygame.time.get_ticks()
+        deck_center = self.deck_anchor(rect)
+        deck_rect = pygame.Rect(0, 0, 94, 128)
+        deck_rect.center = deck_center
+
+        caption = self.small_font.render(sequence["caption"], True, TEXT_COLOR)
+        self.screen.blit(caption, caption.get_rect(center=(deck_center[0], deck_center[1] - 112)))
+
+        if sequence["phase"] == "shuffle":
+            shuffle_progress = min(1.0, (now - sequence["start_ticks"]) / sequence["shuffle_duration"])
+            wave = math.sin(shuffle_progress * math.pi * 4.0)
+            for layer in range(4):
+                offset = (layer - 1.5) * 10
+                card_rect = deck_rect.move(int(offset + wave * 18 * ((-1) ** layer)), -layer * 3)
+                self.draw_back_card(card_rect, angle=wave * (8 - layer), alpha=255 - layer * 18)
+        else:
+            for layer in range(3):
+                self.draw_back_card(deck_rect.move(0, -layer * 3), alpha=255 - layer * 22)
+
+        for moving_card in sequence["active_cards"]:
+            progress = min(1.0, (now - moving_card["start_ticks"]) / sequence["travel_duration"])
+            eased = 1.0 - ((1.0 - progress) ** 3)
+            target_x, target_y = self.deal_target_anchor(rect, moving_card["player_index"])
+            start_x, start_y = deck_center
+            x = start_x + (target_x - start_x) * eased
+            y = start_y + (target_y - start_y) * eased - math.sin(eased * math.pi) * 62
+            card_rect = pygame.Rect(0, 0, 86, 118)
+            card_rect.center = (int(x), int(y))
+            self.draw_back_card(card_rect, angle=(1.0 - eased) * (12 if moving_card["player_index"] == 0 else -12))
+
+        for pulse in sequence["pulses"]:
+            target_x, target_y = self.deal_target_anchor(rect, pulse["player_index"])
+            progress = min(1.0, (now - pulse["start_ticks"]) / sequence["pulse_duration"])
+            pulse_radius = 18 + int(progress * 28)
+            pulse_alpha = max(0, 180 - int(progress * 180))
+            pulse_surface = pygame.Surface((pulse_radius * 2 + 6, pulse_radius * 2 + 6), pygame.SRCALPHA)
+            pygame.draw.circle(
+                pulse_surface,
+                (*ACCENT_BLUE, pulse_alpha),
+                (pulse_surface.get_width() // 2, pulse_surface.get_height() // 2),
+                pulse_radius,
+                3,
+            )
+            self.screen.blit(
+                pulse_surface,
+                (target_x - pulse_surface.get_width() // 2, target_y - pulse_surface.get_height() // 2),
+            )
+
+        info = self.tiny_font.render("Opening hands and round draws are dealt from the central deck.", True, MUTED_COLOR)
+        self.screen.blit(info, info.get_rect(center=(deck_center[0], deck_center[1] + 96)))
+
     def draw_background(self) -> None:
         self.screen.fill(BG_COLOR)
-        pygame.draw.circle(self.screen, BG_WASH, (220, 120), 220)
-        pygame.draw.circle(self.screen, BG_WASH, (SCREEN_WIDTH - 180, 100), 240)
-        for y in range(0, SCREEN_HEIGHT, 32):
+        glow_surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        pygame.draw.circle(glow_surface, (*BG_WASH, 70), (SCREEN_WIDTH // 2, 280), 340)
+        pygame.draw.circle(glow_surface, (*ACCENT_BLUE, 38), (SCREEN_WIDTH // 2, 280), 250)
+        pygame.draw.circle(glow_surface, (*ACCENT_BLUE, 18), (220, 120), 190)
+        pygame.draw.circle(glow_surface, (*ACCENT_BLUE, 18), (SCREEN_WIDTH - 200, 120), 210)
+        self.screen.blit(glow_surface, (0, 0))
+
+        for x in range(0, SCREEN_WIDTH, 56):
+            pygame.draw.line(self.screen, BG_LINE, (x, 0), (x, SCREEN_HEIGHT), 1)
+        for y in range(0, SCREEN_HEIGHT, 56):
             pygame.draw.line(self.screen, BG_LINE, (0, y), (SCREEN_WIDTH, y), 1)
 
     def draw(self) -> None:
@@ -651,17 +1123,7 @@ class Game:
             if self.current_screen == "menu":
                 self.draw_menu()
             elif self.current_screen == "instruction":
-                self.draw_info_screen(
-                    "How To Play",
-                    [
-                        "1. Each player starts with 5 energy and 2 cards.",
-                        "2. At the start of every turn, the active player gains 2 energy and draws 2 cards.",
-                        "3. Drag cards from the bottom row into the arena to use them.",
-                        "4. You may use effect cards, then one action card for the turn.",
-                        "5. Force cards push the opponent, while Dodge can avoid the next shove.",
-                        "6. Push the other player past the edge of the stage to win.",
-                    ],
-                )
+                self.draw_instruction_screen()
             else:
                 self.draw_info_screen(
                     "About Us",
@@ -682,19 +1144,32 @@ class Game:
 
         self.end_turn_button.rect = pygame.Rect(SCREEN_WIDTH - 314, SCREEN_HEIGHT - 128, 270, 48)
         self.reset_button.rect = pygame.Rect(SCREEN_WIDTH - 314, SCREEN_HEIGHT - 72, 270, 40)
+        self.log_button.rect = pygame.Rect(SCREEN_WIDTH - 314, SCREEN_HEIGHT - 176, 270, 40)
 
         self.draw_board(board_rect)
         self.draw_header(hud_rect)
+        self.draw_turn_banner()
         self.draw_friction_chip(friction_rect)
+        self.draw_side_hand_stacks(board_rect)
+        self.draw_deal_sequence(board_rect)
         self.draw_hand(hand_rect)
         self.draw_dragging_card()
         self.draw_card_use_animation()
 
-        can_end_turn = not self.animation and self.winner is None and self.turn_phase in {"playing", "turn_complete"}
+        can_end_turn = (
+            not self.log_view_open
+            and not self.animation
+            and not self.deal_sequence
+            and self.winner is None
+            and self.turn_phase in {"playing", "turn_complete"}
+        )
+        self.log_button.draw(self.screen, self.small_font, True)
         self.end_turn_button.draw(self.screen, self.body_font, can_end_turn)
         self.reset_button.draw(self.screen, self.small_font, True)
 
-        if self.selected_card_index is not None and self.turn_phase == "playing":
+        if self.deal_sequence:
+            prompt = "Cards are being dealt. Wait for the draw sequence to finish."
+        elif self.selected_card_index is not None and self.turn_phase == "playing":
             prompt = "Drag the selected card into the arena to use it."
         elif self.turn_phase == "turn_complete" and can_end_turn:
             prompt = "Action resolved. Press ENTER or click End Turn to pass the duel."
@@ -707,9 +1182,80 @@ class Game:
         prompt_text = self.small_font.render(prompt, True, MUTED_COLOR)
         self.screen.blit(prompt_text, (28, SCREEN_HEIGHT - 30))
 
+        self.draw_victory_cutscene()
+
+        if self.log_view_open:
+            self.draw_log_overlay()
+
         self.draw_transition_overlay()
 
         pygame.display.flip()
+
+    def draw_log_overlay(self) -> None:
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((2, 8, 20, 188))
+        self.screen.blit(overlay, (0, 0))
+
+        panel = pygame.Rect(0, 0, 980, 690)
+        panel.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+        self.draw_overlay_panel(panel, (8, 22, 52, 242), (88, 196, 255, 220), radius=28)
+
+        page = self.current_log_page()
+        title_text = "Battle Log" if page is None else f"Battle Log - {page['title']}"
+        title = self.hero_font.render(title_text, True, TEXT_COLOR)
+        self.screen.blit(title, (panel.x + 34, panel.y + 28))
+
+        page_counter = self.small_font.render(
+            f"Page {self.log_page_index + 1}/{max(1, len(self.battle_log_pages))}",
+            True,
+            MUTED_COLOR,
+        )
+        self.screen.blit(page_counter, (panel.right - 160, panel.y + 54))
+
+        log_view_rect = pygame.Rect(panel.x + 36, panel.y + 132, panel.width - 72, panel.height - 232)
+        pygame.draw.rect(self.screen, (7, 18, 40), log_view_rect, border_radius=20)
+        pygame.draw.rect(self.screen, CARD_BORDER, log_view_rect, width=1, border_radius=20)
+
+        content_surface = pygame.Surface((log_view_rect.width - 28, 2000), pygame.SRCALPHA)
+        content_y = 0
+        if page is None or not page["entries"]:
+            empty = self.body_font.render("No battle log entries yet.", True, MUTED_COLOR)
+            content_surface.blit(empty, (8, 8))
+            content_y = 40
+        else:
+            for entry_index, entry in enumerate(page["entries"], start=1):
+                bullet = self.small_font.render(f"{entry_index}.", True, TEXT_COLOR)
+                content_surface.blit(bullet, (4, content_y + 2))
+                wrapped = self.wrap_text(entry, self.small_font, log_view_rect.width - 86, 5)
+                for line in wrapped:
+                    text = self.small_font.render(line, True, TEXT_COLOR)
+                    content_surface.blit(text, (34, content_y))
+                    content_y += 26
+                content_y += 10
+
+        visible_height = log_view_rect.height - 24
+        max_scroll = max(0, content_y - visible_height)
+        self.log_scroll_offset = min(self.log_scroll_offset, max_scroll)
+        content_clip = pygame.Rect(0, self.log_scroll_offset, log_view_rect.width - 28, visible_height)
+        self.screen.blit(content_surface, (log_view_rect.x + 14, log_view_rect.y + 12), area=content_clip)
+
+        if max_scroll > 0:
+            track_rect = pygame.Rect(log_view_rect.right - 12, log_view_rect.y + 16, 6, log_view_rect.height - 32)
+            pygame.draw.rect(self.screen, (15, 44, 78), track_rect, border_radius=3)
+            thumb_height = max(42, int(track_rect.height * (visible_height / max(content_y, 1))))
+            thumb_y = track_rect.y + int((track_rect.height - thumb_height) * (self.log_scroll_offset / max(max_scroll, 1)))
+            thumb_rect = pygame.Rect(track_rect.x, thumb_y, track_rect.width, thumb_height)
+            pygame.draw.rect(self.screen, ACCENT_BLUE, thumb_rect, border_radius=3)
+
+        self.log_prev_button.rect = pygame.Rect(panel.x + 36, panel.bottom - 74, 140, 42)
+        self.log_next_button.rect = pygame.Rect(panel.x + 188, panel.bottom - 74, 140, 42)
+        self.log_close_button.rect = pygame.Rect(panel.right - 176, panel.bottom - 74, 140, 42)
+        self.log_prev_button.draw(self.screen, self.small_font, self.log_page_index > 0)
+        self.log_next_button.draw(self.screen, self.small_font, self.log_page_index < len(self.battle_log_pages) - 1)
+        self.log_close_button.draw(self.screen, self.small_font, True)
+
+        hint = self.small_font.render("Use mouse wheel to scroll this round's actions.", True, MUTED_COLOR)
+        self.screen.blit(hint, (panel.x + 36, panel.bottom - 116))
 
     def draw_menu(self) -> None:
         title = self.hero_font.render("Physics Card Duel", True, TEXT_COLOR)
@@ -719,7 +1265,7 @@ class Game:
 
         menu_panel = pygame.Rect(0, 0, 420, 300)
         menu_panel.center = (SCREEN_WIDTH // 2, 500)
-        self.draw_overlay_panel(menu_panel, (255, 250, 241, 220), (138, 121, 102, 200), radius=28)
+        self.draw_overlay_panel(menu_panel, (10, 24, 56, 220), (88, 196, 255, 200), radius=28)
 
         labels = ["play", "instruction", "about"]
         for index, key in enumerate(labels):
@@ -733,7 +1279,7 @@ class Game:
     def draw_info_screen(self, title_text: str, lines: List[str]) -> None:
         panel = pygame.Rect(0, 0, 980, 600)
         panel.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
-        self.draw_overlay_panel(panel, (255, 250, 241, 225), (138, 121, 102, 210), radius=28)
+        self.draw_overlay_panel(panel, (10, 24, 56, 225), (88, 196, 255, 210), radius=28)
 
         title = self.hero_font.render(title_text, True, TEXT_COLOR)
         self.screen.blit(title, (panel.x + 42, panel.y + 42))
@@ -750,13 +1296,42 @@ class Game:
         self.back_button.rect = pygame.Rect(panel.x + 42, panel.bottom - 82, 180, 46)
         self.back_button.draw(self.screen, self.body_font, True)
 
+    def draw_instruction_screen(self) -> None:
+        panel = pygame.Rect(0, 0, 980, 620)
+        panel.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+        self.draw_overlay_panel(panel, (10, 24, 56, 225), (88, 196, 255, 210), radius=28)
+
+        title = self.hero_font.render("How To Play", True, TEXT_COLOR)
+        self.screen.blit(title, (panel.x + 42, panel.y + 42))
+
+        info_lines = [
+            "1. Each player starts with 5 energy and 2 cards.",
+            "2. At the start of every turn, the active player gains 2 energy and draws 2 cards.",
+            "3. Drag a card from the bottom row into the arena to use it.",
+            "4. You may use effect cards first, then one action card for the turn.",
+            "5. Force cards push the opponent. Dodge prepares an evasion against the next shove.",
+            "6. Smooth lowers friction and Rough raises friction.",
+            "7. Push the other player past the edge of the stage to win.",
+        ]
+        y = panel.y + 150
+        for line in info_lines:
+            wrapped = self.wrap_text(line, self.body_font, panel.width - 84, 3)
+            for wrapped_line in wrapped:
+                text = self.body_font.render(wrapped_line, True, TEXT_COLOR)
+                self.screen.blit(text, (panel.x + 42, y))
+                y += 34
+            y += 8
+
+        self.back_button.rect = pygame.Rect(panel.x + 42, panel.bottom - 82, 180, 46)
+        self.back_button.draw(self.screen, self.body_font, True)
+
     def draw_transition_overlay(self) -> None:
         if not self.transition:
             return
         progress = self.transition_progress()
         alpha = int((1.0 - progress) * 235)
         overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        overlay.fill((245, 241, 232, alpha))
+        overlay.fill((4, 10, 28, alpha))
         self.screen.blit(overlay, (0, 0))
 
         title_alpha = int((1.0 - progress) * 255)
@@ -766,9 +1341,9 @@ class Game:
 
     def draw_header(self, rect: pygame.Rect) -> None:
         current = self.current_player()
-        self.draw_overlay_panel(rect, (255, 251, 243, 225), (138, 121, 102, 180))
+        self.draw_overlay_panel(rect, (9, 24, 58, 225), (88, 196, 255, 180))
         title = self.body_font.render("Physics Card Duel", True, TEXT_COLOR)
-        subtitle = self.small_font.render(f"Round {self.round_number} | Active {current.name}", True, MUTED_COLOR)
+        subtitle = self.small_font.render(f"Round {self.round_number}", True, MUTED_COLOR)
         energy = self.small_font.render(f"Energy {current.energy}/{MAX_ENERGY}", True, TEXT_COLOR)
         cards = self.small_font.render(f"Cards {len(current.hand)}", True, TEXT_COLOR)
         opponent = self.small_font.render(
@@ -782,8 +1357,19 @@ class Game:
         self.screen.blit(cards, (rect.x + 18, rect.y + 100))
         self.screen.blit(opponent, (rect.x + 156, rect.y + 88))
 
+    def draw_turn_banner(self) -> None:
+        if self.current_screen != "game":
+            return
+        rect = pygame.Rect(0, 0, 240, 50)
+        rect.midtop = (SCREEN_WIDTH // 2, 22)
+        self.draw_overlay_panel(rect, (9, 24, 58, 225), (88, 196, 255, 190), radius=18)
+        label = self.small_font.render("Current Turn", True, MUTED_COLOR)
+        value = self.body_font.render(self.current_player().name, True, TEXT_COLOR)
+        self.screen.blit(label, label.get_rect(center=(rect.centerx, rect.y + 15)))
+        self.screen.blit(value, value.get_rect(center=(rect.centerx, rect.y + 35)))
+
     def draw_friction_chip(self, rect: pygame.Rect) -> None:
-        self.draw_overlay_panel(rect, (255, 251, 243, 225), (138, 121, 102, 180), radius=16)
+        self.draw_overlay_panel(rect, (9, 24, 58, 225), (88, 196, 255, 180), radius=16)
         label = self.tiny_font.render("Coefficient of Friction", True, MUTED_COLOR)
         value = self.body_font.render(f"{self.stage_friction:.2f}", True, TEXT_COLOR)
         self.screen.blit(label, (rect.x + 14, rect.y + 8))
@@ -802,9 +1388,16 @@ class Game:
             scaled = pygame.transform.smoothscale(image, scaled_size)
             image_rect = scaled.get_rect(center=card_rect.center)
             self.screen.blit(scaled, image_rect.topleft)
+            if selected:
+                glow_rect = image_rect.inflate(14, 14)
+                glow = pygame.Surface((glow_rect.width, glow_rect.height), pygame.SRCALPHA)
+                pygame.draw.rect(glow, (*ACCENT_BLUE, 55), glow.get_rect(), border_radius=24)
+                pygame.draw.rect(glow, ACCENT_BLUE, glow.get_rect(), width=2, border_radius=24)
+                self.screen.blit(glow, glow_rect.topleft)
+                self.screen.blit(scaled, image_rect.topleft)
             if not playable:
                 disabled_overlay = pygame.Surface((scaled_size[0], scaled_size[1]), pygame.SRCALPHA)
-                disabled_overlay.fill((220, 214, 205, 150))
+                disabled_overlay.fill((12, 20, 34, 150))
                 self.screen.blit(disabled_overlay, image_rect.topleft)
             return
 
@@ -915,55 +1508,73 @@ class Game:
         self.draw_card_frame(rect, self.card_use_animation["card"], True, True)
 
     def draw_board(self, rect: pygame.Rect) -> None:
-        arena_center = (rect.centerx, rect.y + 320)
-        arena_radius = min(228, max(170, (rect.height // 2) - 100))
-        outer_radius = arena_radius + 30
-        inner_radius = arena_radius - 26
+        arena_center, arena_radius_x, arena_radius_y = self.arena_geometry(rect)
+        arena_rect = self.arena_ellipse_rect(rect)
+        outer_rect = arena_rect.inflate(92, 92)
+        mid_rect = arena_rect.inflate(44, 44)
+        inner_rect = arena_rect.inflate(-22, -22)
 
-        pygame.draw.circle(self.screen, VOID_COLOR, arena_center, outer_radius + 18)
-        pygame.draw.circle(self.screen, (183, 166, 133), arena_center, outer_radius)
-        pygame.draw.circle(self.screen, ACCENT_GOLD, arena_center, outer_radius, 3)
-        pygame.draw.circle(self.screen, (233, 223, 199), arena_center, arena_radius)
-        pygame.draw.circle(self.screen, STAGE_COLOR, arena_center, arena_radius, 3)
-        pygame.draw.circle(self.screen, (176, 154, 120), arena_center, inner_radius, 2)
-        pygame.draw.circle(self.screen, (176, 154, 120), arena_center, inner_radius - 34, 1)
-        pygame.draw.circle(self.screen, (176, 154, 120), arena_center, inner_radius - 68, 1)
+        glow_surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        for inflate_x, inflate_y, alpha in [(120, 120, 22), (82, 82, 30), (44, 44, 52)]:
+            glow_rect = arena_rect.inflate(inflate_x, inflate_y)
+            pygame.draw.ellipse(glow_surface, (*ACCENT_BLUE, alpha), glow_rect)
+        self.screen.blit(glow_surface, (0, 0))
 
-        # Newton-style orbit and gravity cues.
-        pygame.draw.ellipse(
-            self.screen,
-            ACCENT_GOLD,
-            pygame.Rect(arena_center[0] - arena_radius + 16, arena_center[1] - 52, (arena_radius - 16) * 2, 104),
-            1,
-        )
-        pygame.draw.ellipse(
-            self.screen,
-            ACCENT_GOLD,
-            pygame.Rect(arena_center[0] - 68, arena_center[1] - arena_radius + 18, 136, (arena_radius - 18) * 2),
-            1,
-        )
-        apple_center = (arena_center[0], arena_center[1] - arena_radius + 30)
-        pygame.draw.circle(self.screen, ACCENT_RED, apple_center, 10)
-        pygame.draw.line(self.screen, ACCENT_GREEN, (apple_center[0], apple_center[1] - 10), (apple_center[0] + 6, apple_center[1] - 20), 2)
-        pygame.draw.line(self.screen, ACCENT_GREEN, (apple_center[0] + 5, apple_center[1] - 20), (apple_center[0] + 11, apple_center[1] - 16), 2)
+        pygame.draw.ellipse(self.screen, VOID_COLOR, outer_rect)
+        pygame.draw.ellipse(self.screen, (7, 20, 46), mid_rect)
+        pygame.draw.ellipse(self.screen, STAGE_COLOR, arena_rect)
+
+        arena_surface = pygame.Surface((arena_rect.width, arena_rect.height), pygame.SRCALPHA)
+        grid_surface = pygame.Surface((arena_rect.width, arena_rect.height), pygame.SRCALPHA)
+        mask_surface = pygame.Surface((arena_rect.width, arena_rect.height), pygame.SRCALPHA)
+        pygame.draw.ellipse(mask_surface, (255, 255, 255, 255), mask_surface.get_rect())
+        arena_surface.blit(mask_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MAX)
+        arena_surface.fill((0, 0, 0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+        pygame.draw.ellipse(arena_surface, (14, 34, 74, 255), arena_surface.get_rect())
+
+        for x in range(0, arena_rect.width, 46):
+            line_color = (*ACCENT_BLUE, 46 if x % 92 else 72)
+            pygame.draw.line(grid_surface, line_color, (x, 0), (x, arena_rect.height), 1)
+        for y in range(0, arena_rect.height, 46):
+            line_color = (*ACCENT_BLUE, 42 if y % 92 else 68)
+            pygame.draw.line(grid_surface, line_color, (0, y), (arena_rect.width, y), 1)
+        grid_surface.blit(mask_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        arena_surface.blit(grid_surface, (0, 0))
+        self.screen.blit(arena_surface, arena_rect.topleft)
+
+        pygame.draw.ellipse(self.screen, ACCENT_BLUE, outer_rect, 2)
+        pygame.draw.ellipse(self.screen, ACCENT_GOLD, mid_rect, 2)
+        pygame.draw.ellipse(self.screen, ACCENT_BLUE, arena_rect, 3)
+        pygame.draw.ellipse(self.screen, ACCENT_GOLD, inner_rect, 2)
+
+        top_bracket = pygame.Rect(arena_center[0] - 74, arena_rect.y - 8, 148, 12)
+        bottom_bracket = pygame.Rect(arena_center[0] - 74, arena_rect.bottom - 4, 148, 12)
+        pygame.draw.rect(self.screen, ACCENT_BLUE, top_bracket, border_radius=4)
+        pygame.draw.rect(self.screen, ACCENT_BLUE, bottom_bracket, border_radius=4)
 
         left_bound = self.battlefield_position(0.0, rect)
         center_mark = self.battlefield_position(STAGE_LENGTH / 2, rect)
         right_bound = self.battlefield_position(STAGE_LENGTH, rect)
-        pygame.draw.line(self.screen, CARD_BORDER, left_bound, right_bound, 2)
+        pygame.draw.line(self.screen, ACCENT_GOLD, left_bound, right_bound, 3)
         for meter in [0, 5, 10, 15, 20, 25]:
             x, y = self.battlefield_position(float(meter), rect)
-            pygame.draw.line(self.screen, CARD_BORDER, (x, y - 10), (x, y + 10), 2)
+            pygame.draw.line(self.screen, ACCENT_BLUE, (x, y - 12), (x, y + 12), 2)
             label = self.tiny_font.render(str(meter), True, MUTED_COLOR)
-            self.screen.blit(label, (x - label.get_width() // 2, arena_center[1] + arena_radius + 18))
-        pygame.draw.circle(self.screen, CARD_BORDER, center_mark, 4)
+            self.screen.blit(label, (x - label.get_width() // 2, arena_center[1] + arena_radius_y + 20))
+        pygame.draw.circle(self.screen, ACCENT_GOLD, center_mark, 5)
 
         for index, player in enumerate(self.players):
             clamped = max(0.0, min(STAGE_LENGTH, player.position))
             x, y = self.battlefield_position(clamped, rect, index)
             color = ACCENT_BLUE if index == 0 else ACCENT_RED
             radius = 20
-            facing = 1 if index == 0 else -1
+            alpha = 255
+            if self.animation and self.animation["type"] == "fall" and self.animation["player_index"] == index:
+                elapsed = (pygame.time.get_ticks() - self.animation["start_ticks"]) / 1000.0
+                progress = min(1.0, elapsed / self.animation["duration"])
+                radius = max(10, int(radius * (1.0 - (progress * 0.24))))
+                alpha = max(55, int(255 * (1.0 - progress * 0.72)))
+            facing = int(self.player_facing_direction(index))
             shoulder_front = (x + facing * (radius - 4), y - 2)
             shoulder_rear = (x + facing * (radius - 10), y + 8)
             front_hand = (x + facing * (radius + 12), y - 8)
@@ -980,13 +1591,27 @@ class Game:
                     touch_y = int((y + other_y) / 2 - 8)
                     front_hand = (touch_x, touch_y)
             if index == self.current_player_index and self.winner is None:
-                pygame.draw.circle(self.screen, GLOW_COLOR, (x, y), radius + 8)
-            pygame.draw.line(self.screen, TEXT_COLOR, shoulder_front, front_hand, 4)
-            pygame.draw.line(self.screen, TEXT_COLOR, shoulder_rear, rear_hand, 4)
-            pygame.draw.circle(self.screen, ACCENT_GOLD, front_hand, 4)
-            pygame.draw.circle(self.screen, ACCENT_GOLD, rear_hand, 4)
-            pygame.draw.circle(self.screen, color, (x, y), radius)
-            pygame.draw.circle(self.screen, TEXT_COLOR, (x, y), radius, 3)
+                glow_radius = radius + (10 if alpha == 255 else 6)
+                pygame.draw.circle(self.screen, GLOW_COLOR, (x, y), glow_radius)
+
+            player_surface = pygame.Surface((radius * 6, radius * 6), pygame.SRCALPHA)
+            center = (player_surface.get_width() // 2, player_surface.get_height() // 2)
+            offset = (center[0] - x, center[1] - y)
+
+            def shift(point: tuple[int, int]) -> tuple[int, int]:
+                return point[0] + offset[0], point[1] + offset[1]
+
+            arm_color = (*TEXT_COLOR, alpha)
+            hand_color = (*ACCENT_GOLD, alpha)
+            body_color = (*color, alpha)
+            outline_color = (*TEXT_COLOR, alpha)
+            pygame.draw.line(player_surface, arm_color, shift(shoulder_front), shift(front_hand), 4)
+            pygame.draw.line(player_surface, arm_color, shift(shoulder_rear), shift(rear_hand), 4)
+            pygame.draw.circle(player_surface, hand_color, shift(front_hand), 4)
+            pygame.draw.circle(player_surface, hand_color, shift(rear_hand), 4)
+            pygame.draw.circle(player_surface, body_color, center, radius)
+            pygame.draw.circle(player_surface, outline_color, center, radius, 3)
+            self.screen.blit(player_surface, (x - center[0], y - center[1]))
             name = self.small_font.render(player.name, True, TEXT_COLOR)
             self.screen.blit(name, name.get_rect(center=(x, y - 46)))
             if player.dodge_ready:
@@ -1007,18 +1632,23 @@ class Game:
         if self.animation:
             if self.animation["type"] in {"dodge", "push"}:
                 display_force = int(self.animation["force"])
-            else:
+            elif self.animation["type"] == "motion":
                 display_force = int(self.animation["motions"][0]["force"])
-            anim_text = self.small_font.render(
-                f"{self.animation['label']}: {display_force}N resolving",
-                True,
-                TEXT_COLOR,
-            )
+                label_text = f"{self.animation['label']}: {display_force}N resolving"
+            else:
+                display_force = 0
+                label_text = "Void fall resolving"
+            if self.animation["type"] != "fall":
+                label_text = f"{self.animation['label']}: {display_force}N resolving"
+            anim_text = self.small_font.render(label_text, True, TEXT_COLOR)
             self.screen.blit(anim_text, (rect.right - 340, rect.y + 24))
 
-        if self.winner is not None:
+        if self.winner is not None and not (self.animation and self.animation["type"] == "victory"):
             win_text = self.title_font.render(f"{self.players[self.winner].name} Wins", True, ACCENT_GREEN)
             self.screen.blit(win_text, (rect.right - 320, rect.y + 62))
+        elif self.animation and self.animation["type"] == "fall":
+            void_text = self.title_font.render("Void Breach", True, ACCENT_BLUE)
+            self.screen.blit(void_text, (rect.right - 320, rect.y + 62))
 
     def draw_sidebar(self, rect: pygame.Rect) -> None:
         current = self.current_player()
@@ -1068,6 +1698,13 @@ class Game:
         self.screen.blit(friction_label, friction_label.get_rect(center=friction_rect.center))
 
     def draw_hand(self, rect: pygame.Rect) -> None:
+        if self.deal_sequence:
+            current_rect = pygame.Rect(rect.x, rect.y + 20, rect.width, rect.height - 20)
+            label = self.body_font.render(f"{self.current_player().name} hand", True, MUTED_COLOR)
+            self.screen.blit(label, label.get_rect(midtop=(current_rect.centerx, current_rect.y)))
+            self.card_rects = []
+            return
+
         player = self.current_player()
         self.card_rects = []
         if not player.hand:
@@ -1109,10 +1746,24 @@ class Game:
                 self.start_drag(index, pos)
                 return
 
+    def handle_log_click(self, pos) -> bool:
+        if not self.log_view_open:
+            return False
+        if self.log_close_button.contains(pos):
+            self.close_log_view()
+            return True
+        if self.log_prev_button.contains(pos) and self.log_page_index > 0:
+            self.change_log_page(-1)
+            return True
+        if self.log_next_button.contains(pos) and self.log_page_index < len(self.battle_log_pages) - 1:
+            self.change_log_page(1)
+            return True
+        return True
+
     def handle_menu_click(self, pos) -> None:
         if self.current_screen == "menu":
             if self.menu_buttons["play"].contains(pos):
-                self.initialize_match()
+                self.initialize_match(animated_setup=True)
                 self.begin_game_transition()
             elif self.menu_buttons["instruction"].contains(pos):
                 self.current_screen = "instruction"
@@ -1127,6 +1778,7 @@ class Game:
             self.clock.tick(FPS)
             self.update_card_use_animation()
             self.update_animation()
+            self.update_deal_sequence()
             self.update_transition()
 
             for event in pygame.event.get():
@@ -1134,7 +1786,9 @@ class Game:
                     running = False
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
-                        if self.current_screen == "game":
+                        if self.current_screen == "game" and self.log_view_open:
+                            self.close_log_view()
+                        elif self.current_screen == "game":
                             running = False
                         elif self.current_screen in {"instruction", "about"}:
                             self.current_screen = "menu"
@@ -1151,13 +1805,21 @@ class Game:
                     if self.current_screen != "game":
                         self.handle_menu_click(event.pos)
                         continue
+                    if self.log_view_open:
+                        self.handle_log_click(event.pos)
+                        continue
                     if self.reset_button.contains(event.pos):
                         self.restart()
+                    elif self.log_button.contains(event.pos):
+                        self.open_log_view()
                     elif self.end_turn_button.contains(event.pos):
                         if not self.animation and self.winner is None and self.turn_phase in {"playing", "turn_complete"}:
                             self.end_turn()
                     else:
                         self.on_card_click(event.pos)
+                elif event.type == pygame.MOUSEWHEEL:
+                    if self.current_screen == "game" and self.log_view_open:
+                        self.scroll_log(-event.y * 36)
                 elif event.type == pygame.MOUSEMOTION:
                     if self.drag_state:
                         self.drag_state["mouse_pos"] = event.pos

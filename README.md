@@ -32,6 +32,7 @@ The advantage of our game:
   <img width="709" height="500" alt="about" src="https://github.com/Jack-keja/Newton-s-Edge/blob/7d2e9dee2b559a3b75d7456e32bba4ec01c2d57c/game_design/about.png" />
   <figcaption>about us pop out window</figcaption>
 </figure>
+
 ## What is in the prototype
 
 - Two players start at `12m` and `14m` on a `25m` stage.

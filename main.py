@@ -1,13 +1,14 @@
 import math
 import os
 import random
+import re
 import threading
 from typing import List, Optional
 
 import pygame
 
 from card_factory import build_opening_hand, draw_random_card
-from education import build_local_explanation, build_physics_prompt
+from education import build_interaction_summary, build_local_explanation, build_markdown_document, build_physics_prompt
 from gemini_education import request_gemini_explanation
 from game_constants import (
     ACCENT_BLUE,
@@ -65,6 +66,12 @@ class Game:
         self.body_font = pygame.font.SysFont("georgia", 22)
         self.small_font = pygame.font.SysFont("georgia", 18)
         self.tiny_font = pygame.font.SysFont("georgia", 15)
+        self.markdown_h1_font = pygame.font.SysFont("georgia", 24, bold=True)
+        self.markdown_h2_font = pygame.font.SysFont("georgia", 20, bold=True)
+        self.markdown_body_font = pygame.font.SysFont("georgia", 18)
+        self.markdown_bold_font = pygame.font.SysFont("georgia", 18, bold=True)
+        self.markdown_italic_font = pygame.font.SysFont("georgia", 18, italic=True)
+        self.markdown_code_font = pygame.font.SysFont("consolas", 16)
         self.hand_card_width = 220
         self.hand_card_height = 282
         self.end_turn_button = Button(pygame.Rect(1040, 680, 200, 58), "End Turn")
@@ -701,8 +708,6 @@ class Game:
         context = dict(self.pending_education_context)
         if motions:
             context["motions"] = [self.motion_to_summary(motion) for motion in motions]
-        if followup_distance > 0:
-            context["outcome"] += f" Follow-up distance: {followup_distance:.2f} m."
         self.pending_education_context = None
         return context
 
@@ -716,6 +721,8 @@ class Game:
             "status": "loading",
             "body": None,
             "context": dict(context),
+            "summary": build_interaction_summary(context),
+            "markdown_body": None,
         }
 
         prompt = build_physics_prompt(context)
@@ -726,9 +733,11 @@ class Game:
                 result = request_gemini_explanation(prompt)
             except Exception as exc:  # noqa: BLE001
                 result = fallback_text + f"\n\nGemini fallback reason: {exc}"
+            markdown_body = build_markdown_document(context, result)
             if self.education_generation and self.education_generation.get("request_id") == request_id:
                 self.education_generation["status"] = "ready"
                 self.education_generation["body"] = result
+                self.education_generation["markdown_body"] = markdown_body
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -743,9 +752,12 @@ class Game:
         self.education_scroll_offset = 0
         self.education_popup = {
             "request_id": self.education_generation["request_id"],
-            "title": "What happened?",
+            "title": "what happen?",
             "body": self.education_generation["body"] or "",
             "context": dict(self.education_generation.get("context") or {}),
+            "summary": dict(self.education_generation.get("summary") or {}),
+            "markdown_body": self.education_generation.get("markdown_body") or "",
+            "view": "summary",
             "opened_ticks": pygame.time.get_ticks(),
             "flip_duration": 620,
             "flip_state": "back",
@@ -770,6 +782,18 @@ class Game:
     def toggle_education_enabled(self) -> None:
         self.set_education_enabled(not self.education_enabled)
 
+    def education_markdown_link_rect(self, panel: pygame.Rect) -> pygame.Rect:
+        link_size = self.body_font.size("Click Here")
+        link_rect = pygame.Rect(0, 0, link_size[0], link_size[1])
+        link_rect.center = (panel.centerx, panel.bottom - 74)
+        return link_rect
+
+    def education_summary_link_rect(self, panel: pygame.Rect) -> pygame.Rect:
+        link_size = self.small_font.size("Back To Card")
+        link_rect = pygame.Rect(0, 0, link_size[0], link_size[1])
+        link_rect.topleft = (panel.x + 34, panel.y + 92)
+        return link_rect
+
     def scroll_education_popup(self, amount: int) -> None:
         if self.education_popup is None:
             return
@@ -782,12 +806,24 @@ class Game:
         if exit_rect.collidepoint(pos):
             self.close_education_popup()
             return True
+        if self.education_popup["flip_state"] == "front" and self.education_popup.get("view") == "summary":
+            link_rect = self.education_markdown_link_rect(panel)
+            if link_rect.collidepoint(pos):
+                self.education_popup["view"] = "markdown"
+                self.education_scroll_offset = 0
+                return True
+        if self.education_popup["flip_state"] == "front" and self.education_popup.get("view") == "markdown":
+            back_rect = self.education_summary_link_rect(panel)
+            if back_rect.collidepoint(pos):
+                self.education_popup["view"] = "summary"
+                self.education_scroll_offset = 0
+                return True
         if panel.collidepoint(pos):
             if self.education_popup["flip_state"] == "back":
                 self.education_popup["flip_state"] = "animating"
                 self.education_popup["flip_target"] = "front"
                 self.education_popup["flip_started_ticks"] = pygame.time.get_ticks()
-            elif self.education_popup["flip_state"] == "front":
+            elif self.education_popup["flip_state"] == "front" and self.education_popup.get("view") == "summary":
                 self.education_popup["flip_state"] = "animating"
                 self.education_popup["flip_target"] = "back"
                 self.education_popup["flip_started_ticks"] = pygame.time.get_ticks()
@@ -795,9 +831,9 @@ class Game:
         return True
 
     def education_layout(self) -> tuple[pygame.Rect, pygame.Rect]:
-        panel = pygame.Rect(0, 0, 900, 620)
+        panel = pygame.Rect(0, 0, 720, 500)
         panel.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
-        exit_rect = pygame.Rect(panel.right - 164, panel.bottom - 62, 130, 40)
+        exit_rect = pygame.Rect(panel.right - 152, panel.bottom - 56, 116, 36)
         return panel, exit_rect
 
     def draw_education_popup(self) -> None:
@@ -830,7 +866,10 @@ class Game:
             show_front = self.education_popup["flip_state"] == "front"
 
         if show_front:
-            card_surface = self.render_education_front(panel.size, exit_rect)
+            if self.education_popup.get("view") == "markdown":
+                card_surface = self.render_education_markdown(panel.size, exit_rect)
+            else:
+                card_surface = self.render_education_front(panel.size, exit_rect)
         else:
             card_surface = self.render_education_back(panel.size, exit_rect)
 
@@ -851,37 +890,54 @@ class Game:
         rect = surface.get_rect()
         pygame.draw.rect(surface, (8, 22, 52, 245), rect, border_radius=28)
         pygame.draw.rect(surface, (88, 196, 255, 220), rect, width=3, border_radius=28)
-        context = self.education_popup.get("context", {})
-        effect_cards = list(context.get("effect_cards") or [])
-        action_card = context.get("action_card")
-        if action_card:
-            effect_cards.append(action_card)
-        actor_name = str(context.get("actor", "p1")).upper()
-        target_name = str(context.get("target", "p2")).upper()
-        actor_text = f"{actor_name}: {' + '.join(effect_cards) if effect_cards else 'Action'}"
+        title = self.hero_font.render("what happen?", True, TEXT_COLOR)
+        surface.blit(title, title.get_rect(center=rect.center))
 
-        enemy_response = str(context.get("enemy_response", "")).lower()
-        reaction_text = f"{target_name}: Dodge" if "dodge" in enemy_response else None
-        actor_lines = self.wrap_text(actor_text, self.body_font, rect.width - 160, 4)
-        reaction_lines = self.wrap_text(reaction_text, self.body_font, rect.width - 160, 2) if reaction_text else []
+        local_exit_rect = pygame.Rect(exit_rect.x - rect.x, exit_rect.y - rect.y, exit_rect.width, exit_rect.height)
+        self.education_exit_button.rect = local_exit_rect
+        self.education_exit_button.draw(surface, self.small_font, True)
+        return surface
 
-        y = rect.y + 150
-        for line in actor_lines:
-            text = self.body_font.render(line, True, TEXT_COLOR)
-            surface.blit(text, text.get_rect(center=(rect.centerx, y)))
-            y += 32
+    def render_education_markdown(self, size: tuple[int, int], exit_rect: pygame.Rect) -> pygame.Surface:
+        surface = pygame.Surface(size, pygame.SRCALPHA)
+        rect = surface.get_rect()
+        pygame.draw.rect(surface, (8, 22, 52, 245), rect, border_radius=28)
+        pygame.draw.rect(surface, (88, 196, 255, 220), rect, width=3, border_radius=28)
 
-        if reaction_lines:
-            plus = self.title_font.render("+", True, ACCENT_BLUE)
-            surface.blit(plus, plus.get_rect(center=(rect.centerx, y + 18)))
-            y += 56
-            for line in reaction_lines:
-                text = self.body_font.render(line, True, TEXT_COLOR)
-                surface.blit(text, text.get_rect(center=(rect.centerx, y)))
-                y += 32
+        title = self.hero_font.render("Physics Behind It", True, TEXT_COLOR)
+        subtitle = self.small_font.render("Gemini markdown explanation", True, MUTED_COLOR)
+        surface.blit(title, (34, 28))
+        surface.blit(subtitle, (36, 72))
 
-        equation = self.hero_font.render("= What Happen?", True, TEXT_COLOR)
-        surface.blit(equation, equation.get_rect(center=(rect.centerx, rect.bottom - 152)))
+        back_text = self.small_font.render("Back To Card", True, ACCENT_BLUE)
+        back_rect = self.education_summary_link_rect(rect)
+        surface.blit(back_text, back_rect.topleft)
+        pygame.draw.line(surface, ACCENT_BLUE, (back_rect.x, back_rect.bottom + 2), (back_rect.right, back_rect.bottom + 2), 1)
+
+        content_rect = pygame.Rect(34, 126, rect.width - 68, rect.height - 190)
+        pygame.draw.rect(surface, (7, 18, 40), content_rect, border_radius=20)
+        pygame.draw.rect(surface, CARD_BORDER, content_rect, width=1, border_radius=20)
+
+        markdown_body = self.education_popup.get("markdown_body", "")
+        content_surface = pygame.Surface((content_rect.width - 30, 2600), pygame.SRCALPHA)
+        content_y = self.render_supported_markdown_content(content_surface, content_rect, str(markdown_body))
+
+        visible_height = content_rect.height - 24
+        max_scroll = max(0, content_y - visible_height)
+        self.education_scroll_offset = min(self.education_scroll_offset, max_scroll)
+        clip = pygame.Rect(0, self.education_scroll_offset, content_rect.width - 30, visible_height)
+        surface.blit(content_surface, (content_rect.x + 14, content_rect.y + 12), area=clip)
+
+        if max_scroll > 0:
+            track_rect = pygame.Rect(content_rect.right - 12, content_rect.y + 16, 6, content_rect.height - 32)
+            pygame.draw.rect(surface, (15, 44, 78), track_rect, border_radius=3)
+            thumb_height = max(42, int(track_rect.height * (visible_height / max(content_y, 1))))
+            thumb_y = track_rect.y + int((track_rect.height - thumb_height) * (self.education_scroll_offset / max(max_scroll, 1)))
+            thumb_rect = pygame.Rect(track_rect.x, thumb_y, track_rect.width, thumb_height)
+            pygame.draw.rect(surface, ACCENT_BLUE, thumb_rect, border_radius=3)
+
+        hint = self.small_font.render("Use mouse wheel to scroll the explanation.", True, MUTED_COLOR)
+        surface.blit(hint, (34, rect.bottom - 56))
 
         local_exit_rect = pygame.Rect(exit_rect.x - rect.x, exit_rect.y - rect.y, exit_rect.width, exit_rect.height)
         self.education_exit_button.rect = local_exit_rect
@@ -905,45 +961,52 @@ class Game:
         pygame.draw.rect(surface, (8, 22, 52, 245), rect, border_radius=28)
         pygame.draw.rect(surface, (88, 196, 255, 220), rect, width=3, border_radius=28)
 
-        title = self.hero_font.render("Details", True, TEXT_COLOR)
-        subtitle = self.small_font.render("Gemini explanation of the resolved action", True, MUTED_COLOR)
+        title = self.hero_font.render("what happen?", True, TEXT_COLOR)
+        subtitle = self.small_font.render("Resolved interaction", True, MUTED_COLOR)
         surface.blit(title, (34, 28))
         surface.blit(subtitle, (36, 92))
 
-        content_rect = pygame.Rect(34, 132, rect.width - 68, rect.height - 210)
+        content_rect = pygame.Rect(34, 132, rect.width - 68, rect.height - 250)
         pygame.draw.rect(surface, (7, 18, 40), content_rect, border_radius=20)
         pygame.draw.rect(surface, CARD_BORDER, content_rect, width=1, border_radius=20)
 
-        body = self.education_popup["body"]
-        content_surface = pygame.Surface((content_rect.width - 30, 2400), pygame.SRCALPHA)
-        content_y = 0
-        for paragraph in body.splitlines() or [""]:
-            if not paragraph.strip():
-                content_y += 16
-                continue
-            wrapped = self.wrap_text(paragraph, self.small_font, content_rect.width - 58, 12)
-            for line in wrapped:
-                text = self.small_font.render(line, True, TEXT_COLOR)
-                content_surface.blit(text, (8, content_y))
-                content_y += 25
-            content_y += 8
+        summary = dict(self.education_popup.get("summary") or {})
+        actor_lines = self.wrap_text(str(summary.get("actor_expression") or ""), self.body_font, content_rect.width - 40, 3)
+        reaction_text = str(summary.get("reaction_expression") or "")
+        reaction_lines = self.wrap_text(reaction_text, self.body_font, content_rect.width - 40, 2) if reaction_text else []
+        reasoning_lines = self.wrap_text(str(summary.get("reasoning") or ""), self.body_font, content_rect.width - 40, 6)
 
-        visible_height = content_rect.height - 24
-        max_scroll = max(0, content_y - visible_height)
-        self.education_scroll_offset = min(self.education_scroll_offset, max_scroll)
-        clip = pygame.Rect(0, self.education_scroll_offset, content_rect.width - 30, visible_height)
-        surface.blit(content_surface, (content_rect.x + 14, content_rect.y + 12), area=clip)
+        y = content_rect.y + 36
+        for line in actor_lines:
+            text = self.body_font.render(line, True, TEXT_COLOR)
+            surface.blit(text, text.get_rect(center=(content_rect.centerx, y)))
+            y += 32
 
-        if max_scroll > 0:
-            track_rect = pygame.Rect(content_rect.right - 12, content_rect.y + 16, 6, content_rect.height - 32)
-            pygame.draw.rect(surface, (15, 44, 78), track_rect, border_radius=3)
-            thumb_height = max(42, int(track_rect.height * (visible_height / max(content_y, 1))))
-            thumb_y = track_rect.y + int((track_rect.height - thumb_height) * (self.education_scroll_offset / max(max_scroll, 1)))
-            thumb_rect = pygame.Rect(track_rect.x, thumb_y, track_rect.width, thumb_height)
-            pygame.draw.rect(surface, ACCENT_BLUE, thumb_rect, border_radius=3)
+        if reaction_lines:
+            plus = self.title_font.render("+", True, ACCENT_BLUE)
+            surface.blit(plus, plus.get_rect(center=(content_rect.centerx, y + 16)))
+            y += 52
+            for line in reaction_lines:
+                text = self.body_font.render(line, True, TEXT_COLOR)
+                surface.blit(text, text.get_rect(center=(content_rect.centerx, y)))
+                y += 32
 
-        close_hint = self.small_font.render("Use mouse wheel to scroll. Click the card to flip back.", True, MUTED_COLOR)
-        surface.blit(close_hint, (34, rect.bottom - 56))
+        equals = self.title_font.render("=", True, ACCENT_GOLD)
+        surface.blit(equals, equals.get_rect(center=(content_rect.centerx, y + 18)))
+        y += 60
+
+        for line in reasoning_lines:
+            text = self.body_font.render(line, True, TEXT_COLOR)
+            surface.blit(text, text.get_rect(center=(content_rect.centerx, y)))
+            y += 32
+
+        prompt = self.small_font.render("Wanna learn the physics behind this?", True, MUTED_COLOR)
+        prompt_rect = prompt.get_rect(center=(rect.centerx, rect.bottom - 106))
+        surface.blit(prompt, prompt_rect)
+        link = self.body_font.render("Click Here", True, ACCENT_BLUE)
+        link_rect = link.get_rect(center=(rect.centerx, rect.bottom - 74))
+        surface.blit(link, link_rect)
+        pygame.draw.line(surface, ACCENT_BLUE, (link_rect.x, link_rect.bottom + 2), (link_rect.right, link_rect.bottom + 2), 2)
 
         local_exit_rect = pygame.Rect(exit_rect.x - rect.x, exit_rect.y - rect.y, exit_rect.width, exit_rect.height)
         self.education_exit_button.rect = local_exit_rect
@@ -1202,6 +1265,241 @@ class Game:
                 trimmed = trimmed[:-1]
             lines[-1] = trimmed.rstrip() + "..."
         return lines
+
+    def markdown_font_for_style(self, style: str, block_type: str) -> pygame.font.Font:
+        if style == "code":
+            return self.markdown_code_font
+        if style == "bold":
+            return self.markdown_bold_font
+        if style == "italic":
+            return self.markdown_italic_font
+        if block_type == "heading1":
+            return self.markdown_h1_font
+        if block_type == "heading2":
+            return self.markdown_h2_font
+        return self.markdown_body_font
+
+    def markdown_color_for_style(self, style: str, block_type: str) -> tuple[int, int, int]:
+        if style == "code":
+            return ACCENT_GOLD
+        if block_type == "heading1":
+            return ACCENT_GOLD
+        if block_type == "heading2":
+            return ACCENT_BLUE
+        if style == "italic":
+            return MUTED_COLOR
+        return TEXT_COLOR
+
+    def parse_markdown_blocks(self, text: str) -> List[dict]:
+        blocks: List[dict] = []
+        for raw_line in str(text).splitlines():
+            stripped = raw_line.rstrip()
+            compact = stripped.strip()
+            if not compact:
+                blocks.append({"type": "blank", "text": ""})
+                continue
+            if compact in {"---", "***", "___"}:
+                blocks.append({"type": "rule", "text": ""})
+                continue
+            if compact.startswith("## "):
+                blocks.append({"type": "heading2", "text": compact[3:]})
+                continue
+            if compact.startswith("# "):
+                blocks.append({"type": "heading1", "text": compact[2:]})
+                continue
+            if compact.startswith("> "):
+                blocks.append({"type": "blockquote", "text": compact[2:]})
+                continue
+            if compact.startswith(("- ", "* ")):
+                blocks.append({"type": "bullet", "text": compact[2:]})
+                continue
+            ordered_match = re.match(r"^(\d+\.)\s+(.*)$", compact)
+            if ordered_match:
+                blocks.append({"type": "numbered", "prefix": ordered_match.group(1), "text": ordered_match.group(2)})
+                continue
+            blocks.append({"type": "paragraph", "text": compact})
+        return blocks
+
+    def parse_inline_markdown(self, text: str) -> List[dict]:
+        tokens: List[dict] = []
+        index = 0
+        while index < len(text):
+            if text.startswith("**", index):
+                end = text.find("**", index + 2)
+                if end != -1:
+                    tokens.append({"text": text[index + 2:end], "style": "bold"})
+                    index = end + 2
+                    continue
+            if text.startswith("`", index):
+                end = text.find("`", index + 1)
+                if end != -1:
+                    tokens.append({"text": text[index + 1:end], "style": "code"})
+                    index = end + 1
+                    continue
+            if text.startswith("*", index):
+                end = text.find("*", index + 1)
+                if end != -1:
+                    tokens.append({"text": text[index + 1:end], "style": "italic"})
+                    index = end + 1
+                    continue
+            next_special = len(text)
+            for marker in ("**", "`", "*"):
+                pos = text.find(marker, index)
+                if pos != -1:
+                    next_special = min(next_special, pos)
+            tokens.append({"text": text[index:next_special], "style": "plain"})
+            index = next_special
+        return [token for token in tokens if token["text"]]
+
+    def wrap_markdown_tokens(self, tokens: List[dict], block_type: str, max_width: int) -> List[List[dict]]:
+        parts: List[dict] = []
+        for token in tokens:
+            segments = re.findall(r"\S+\s*|\s+", token["text"])
+            for segment in segments:
+                if segment:
+                    parts.append({"text": segment, "style": token["style"]})
+
+        if not parts:
+            return [[]]
+
+        lines: List[List[dict]] = []
+        current: List[dict] = []
+        current_width = 0
+        for part in parts:
+            segment_text = part["text"]
+            font = self.markdown_font_for_style(part["style"], block_type)
+            segment_width = font.size(segment_text)[0]
+            if current and current_width + segment_width > max_width and segment_text.strip():
+                while current and current[-1]["text"].isspace():
+                    current.pop()
+                lines.append(current)
+                current = []
+                current_width = 0
+                segment_text = segment_text.lstrip()
+                if not segment_text:
+                    continue
+                segment_width = font.size(segment_text)[0]
+            current.append({"text": segment_text, "style": part["style"]})
+            current_width += segment_width
+
+        while current and current[-1]["text"].isspace():
+            current.pop()
+        if current or not lines:
+            lines.append(current)
+        return lines
+
+    def draw_markdown_line(self, surface: pygame.Surface, parts: List[dict], x: int, y: int, block_type: str) -> int:
+        cursor_x = x
+        line_height = self.markdown_body_font.get_height()
+        for part in parts:
+            font = self.markdown_font_for_style(part["style"], block_type)
+            color = self.markdown_color_for_style(part["style"], block_type)
+            text = part["text"]
+            if not text:
+                continue
+            rendered = font.render(text, True, color)
+            if part["style"] == "code":
+                code_rect = pygame.Rect(cursor_x - 3, y - 1, rendered.get_width() + 6, rendered.get_height() + 4)
+                pygame.draw.rect(surface, (16, 46, 92), code_rect, border_radius=6)
+                pygame.draw.rect(surface, ACCENT_BLUE, code_rect, width=1, border_radius=6)
+            surface.blit(rendered, (cursor_x, y))
+            cursor_x += font.size(text)[0]
+            line_height = max(line_height, rendered.get_height())
+        return line_height
+
+    def render_markdown_content(self, surface: pygame.Surface, rect: pygame.Rect, text: str) -> int:
+        content_y = 0
+        for block in self.parse_markdown_blocks(text):
+            block_type = block["type"]
+            if block_type == "blank":
+                content_y += 14
+                continue
+            if block_type == "rule":
+                pygame.draw.line(surface, CARD_BORDER, (8, content_y + 8), (rect.width - 24, content_y + 8), 1)
+                content_y += 24
+                continue
+
+            prefix = ""
+            indent = 8
+            if block_type == "bullet":
+                prefix = "• "
+                indent = 26
+            elif block_type == "numbered":
+                prefix = f"{block['prefix']} "
+                indent = 34
+
+            if prefix:
+                prefix_font = self.markdown_body_font
+                prefix_color = ACCENT_BLUE
+                prefix_surface = prefix_font.render(prefix, True, prefix_color)
+                surface.blit(prefix_surface, (8, content_y))
+                available_width = rect.width - 58 - indent
+            else:
+                available_width = rect.width - 58
+
+            tokens = self.parse_inline_markdown(block["text"])
+            lines = self.wrap_markdown_tokens(tokens, block_type, available_width)
+            block_x = 8 + (indent if prefix else 0)
+            for line in lines:
+                line_height = self.draw_markdown_line(surface, line, block_x, content_y, block_type)
+                content_y += line_height + (6 if block_type.startswith("heading") else 4)
+
+            if block_type == "heading1":
+                content_y += 10
+            elif block_type == "heading2":
+                content_y += 6
+            else:
+                content_y += 6
+        return content_y
+
+    def render_supported_markdown_content(self, surface: pygame.Surface, rect: pygame.Rect, text: str) -> int:
+        content_y = 0
+        for block in self.parse_markdown_blocks(text):
+            block_type = block["type"]
+            if block_type == "blank":
+                content_y += 14
+                continue
+            if block_type == "rule":
+                pygame.draw.line(surface, CARD_BORDER, (8, content_y + 8), (rect.width - 24, content_y + 8), 1)
+                content_y += 24
+                continue
+
+            prefix = ""
+            indent = 8
+            prefix_color = ACCENT_BLUE
+            if block_type == "bullet":
+                prefix = "-"
+                indent = 26
+            elif block_type == "numbered":
+                prefix = f"{block['prefix']} "
+                indent = 34
+            elif block_type == "blockquote":
+                prefix = "|"
+                indent = 24
+                prefix_color = MUTED_COLOR
+
+            if prefix:
+                prefix_font = self.markdown_body_font
+                prefix_surface = prefix_font.render(prefix, True, prefix_color)
+                surface.blit(prefix_surface, (8, content_y))
+                available_width = rect.width - 58 - indent
+            else:
+                available_width = rect.width - 58
+
+            tokens = self.parse_inline_markdown(block["text"])
+            lines = self.wrap_markdown_tokens(tokens, block_type, available_width)
+            block_x = 8 + (indent if prefix else 0)
+            for line in lines:
+                line_height = self.draw_markdown_line(surface, line, block_x, content_y, block_type)
+                content_y += line_height + (6 if block_type.startswith("heading") else 4)
+
+            if block_type == "heading1":
+                content_y += 10
+            elif block_type == "heading2":
+                content_y += 6
+            else:
+                content_y += 6
+        return content_y
 
     def start_drag(self, index: int, mouse_pos: tuple[int, int]) -> None:
         player = self.current_player()

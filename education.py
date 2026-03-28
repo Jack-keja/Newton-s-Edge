@@ -7,6 +7,13 @@ def _format_effects(effects: list[str]) -> str:
     return ", ".join(effects) if effects else "None"
 
 
+def _reaction_card_name(context: dict[str, Any]) -> str | None:
+    enemy_response = str(context.get("enemy_response", "")).lower()
+    if enemy_response in {"dodge success", "dodge failed"}:
+        return "Dodge"
+    return None
+
+
 def build_physics_prompt(context: dict[str, Any]) -> str:
     effects_text = _format_effects(context["effect_cards"])
     motion_lines = []
@@ -25,7 +32,7 @@ def build_physics_prompt(context: dict[str, Any]) -> str:
     - Target Mass: {context['mass']:.1f} kg
     - Gravity: {context['gravity']:.2f} m/s²
     - Impact Duration: {context['impact_time']:.2f} s
-    - Friction ($\mu$): {context['friction']:.2f}
+    - Friction (mu): {context['friction']:.2f}
 
     Interaction Data:
     - Action: {context['actor']} used {context['action_card']} ({context['action_kind']}) on {context['target']}.
@@ -33,7 +40,7 @@ def build_physics_prompt(context: dict[str, Any]) -> str:
     - Modifiers: {effects_text} | Enemy Response: {context['enemy_response']}
     - Motion Data: {motion_text}
 
-    Constraint: Total response must be under 100 words. Use the exact numbers provided.
+    Constraint: Total response must be under 150 words, using plain text. Use the exact numbers provided.
 
     Required Format: 
     1. Physics Breakdown: (Name the core principle, e.g., "Inertia" or "Impulse").
@@ -95,4 +102,68 @@ def build_local_explanation(context: dict[str, Any]) -> str:
     if context["motions"]:
         motion_bits = [f"{motion['subject']} moved {motion['distance']:.2f} m" for motion in context["motions"]]
         lines.append("Resolved motion: " + ", ".join(motion_bits) + ".")
+    return "\n".join(lines)
+
+
+def build_interaction_summary(context: dict[str, Any]) -> dict[str, str | None]:
+    actor = str(context.get("actor", "p1"))
+    target = str(context.get("target", "p2"))
+    actor_cards = list(context.get("effect_cards") or [])
+    action_card = context.get("action_card")
+    if action_card:
+        actor_cards.append(str(action_card))
+
+    actor_expression = f"{actor} used: {' + '.join(actor_cards) if actor_cards else 'Action card'}"
+    reaction_card = _reaction_card_name(context)
+    reaction_expression = f"{target} used: {reaction_card}" if reaction_card else f"{target} did no action"
+
+    reasons: list[str] = []
+    enemy_response = str(context.get("enemy_response", "")).lower()
+    if context.get("action_kind") == "dodge":
+        reasons.append(f"{actor} prepared a dodge for the next shove.")
+    elif "dodge success" in enemy_response:
+        reasons.append(f"{target} dodged the shove.")
+    elif "dodge failed" in enemy_response:
+        reasons.append(f"{target}'s dodge failed.")
+
+    motions = context.get("motions") or []
+    motion_bits = [f"{motion['subject']} moved {motion['distance']:.2f}m" for motion in motions if motion.get("distance", 0) > 0]
+    if motion_bits:
+        reasons.append(", ".join(motion_bits) + ".")
+
+    if not reasons:
+        outcome = str(context.get("outcome", "")).strip()
+        if outcome:
+            reasons.append(outcome)
+        else:
+            reasons.append("The action resolved without a visible movement change.")
+
+    return {
+        "actor_expression": actor_expression,
+        "reaction_expression": reaction_expression,
+        "reasoning": " ".join(reasons).strip(),
+    }
+
+
+def build_markdown_document(context: dict[str, Any], gemini_text: str) -> str:
+    summary = build_interaction_summary(context)
+    lines = [
+        "# What happen?",
+        "",
+        "## Card Interaction",
+        summary["actor_expression"] or "",
+    ]
+    if summary["reaction_expression"]:
+        lines.append(summary["reaction_expression"])
+    lines.extend(
+        [
+            "",
+            "## Result",
+            summary["reasoning"] or "",
+            "",
+            "## Physics Behind It",
+            gemini_text.strip() or "No Gemini response was returned.",
+            "",
+        ]
+    )
     return "\n".join(lines)

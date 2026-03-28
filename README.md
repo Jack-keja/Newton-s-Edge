@@ -12,8 +12,10 @@ The advantage of our game:
 - simple rules (easy for new-comers to play the game)
 - detailed animation/design of the cards and background of this game
 ## Game Design
-![Game Screenshot](75N.png)
-<img width="709" height="147" alt="Menu" src="https://github.com/Jack-keja/Newton-s-Edge/blob/dc6c5a4cb3d2f1948e4665a0d535598d9ca94cca/game_design/menu.png" />
+<img width="709" height="500" alt="Menu" src="https://github.com/Jack-keja/Newton-s-Edge/blob/dc6c5a4cb3d2f1948e4665a0d535598d9ca94cca/game_design/menu.png" />
+<img width="709" height="500" alt="gaming" src="https://github.com/Jack-keja/Newton-s-Edge/blob/7d2e9dee2b559a3b75d7456e32bba4ec01c2d57c/game_design/gaming.png" />
+<img width="709" height="500" alt="how_to_play" src="https://github.com/Jack-keja/Newton-s-Edge/blob/7d2e9dee2b559a3b75d7456e32bba4ec01c2d57c/game_design/How_to_play.png" />
+<img width="709" height="500" alt="about" src="https://github.com/Jack-keja/Newton-s-Edge/blob/7d2e9dee2b559a3b75d7456e32bba4ec01c2d57c/game_design/about.png" />
 
 ## What is in the prototype
 

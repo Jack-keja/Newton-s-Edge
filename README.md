@@ -15,22 +15,24 @@ The advantage of our game:
 
 <figure>
   <img width="709" height="500" alt="Menu" src="https://github.com/Jack-keja/Newton-s-Edge/blob/3f702bd1d40eccc8bf52def0efd3eea4cbbe7843/game_design/menu.png" />
-  <figcaption>main menu</figcaption>
+  <figcaption>
+    Fig. 1: main menu
+  </figcaption>
 </figure>
 <figure>
   
   <img width="709" height="500" alt="gaming" src="https://github.com/Jack-keja/Newton-s-Edge/blob/7d2e9dee2b559a3b75d7456e32bba4ec01c2d57c/game_design/gaming.png" />
-  <figcaption>playing interface</figcaption>
+  <figcaption>Fig. 2: playing interface</figcaption>
 </figure>
 
 <figure> 
   <img width="709" height="500" alt="how_to_play" src="https://github.com/Jack-keja/Newton-s-Edge/blob/7d2e9dee2b559a3b75d7456e32bba4ec01c2d57c/game_design/How_to_play.png" />
-  <figcaption>instruction pop out window</figcaption>
+  <figcaption>Fig. 3: instruction pop out window</figcaption>
 </figure>
 
 <figure>
   <img width="709" height="500" alt="about" src="https://github.com/Jack-keja/Newton-s-Edge/blob/7d2e9dee2b559a3b75d7456e32bba4ec01c2d57c/game_design/about.png" />
-  <figcaption>about us pop out window</figcaption>
+  <figcaption>Fig. 4: about us pop out window</figcaption>
 </figure>
 
 ## What is in the prototype

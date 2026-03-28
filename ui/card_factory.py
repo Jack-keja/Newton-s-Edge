@@ -1,6 +1,6 @@
 import random
 
-from .game_models import Card
+from game_models import Card
 
 
 def _deck_definition() -> tuple[list[Card], list[int]]:

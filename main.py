@@ -8,9 +8,9 @@ from typing import List, Optional
 import pygame
 
 from ui.card_factory import build_opening_hand, draw_random_card
-from education.education import build_interaction_summary, build_local_explanation, build_physics_prompt, extract_explanation_sections
-from education.gemini_education import request_gemini_explanation
-from ui.game_constants import (
+from education_function.education import build_interaction_summary, build_local_explanation, build_physics_prompt, extract_explanation_sections
+from education_function.gemini_education import request_gemini_explanation
+from game_constants import (
     ACCENT_BLUE,
     ACCENT_GOLD,
     ACCENT_GREEN,
@@ -50,7 +50,7 @@ from ui.game_constants import (
     TEXT_COLOR,
     VOID_COLOR,
 )
-from ui.game_models import Card, PendingRestore, Player
+from game_models import Card, PendingRestore, Player
 from ui.ui_components import Button
 
 

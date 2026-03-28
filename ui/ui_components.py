@@ -1,6 +1,6 @@
 import pygame
 
-from game_constants import ACCENT_BLUE, CARD_DISABLED, MUTED_COLOR, TEXT_COLOR
+from .game_constants import ACCENT_BLUE, CARD_DISABLED, MUTED_COLOR, TEXT_COLOR
 
 
 class Button:

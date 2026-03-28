@@ -7,10 +7,10 @@ from typing import List, Optional
 
 import pygame
 
-from card_factory import build_opening_hand, draw_random_card
-from education import build_interaction_summary, build_local_explanation, build_markdown_document, build_physics_prompt
-from gemini_education import request_gemini_explanation
-from game_constants import (
+from ui.card_factory import build_opening_hand, draw_random_card
+from education.education import build_interaction_summary, build_local_explanation, build_physics_prompt, extract_explanation_sections
+from education.gemini_education import request_gemini_explanation
+from ui.game_constants import (
     ACCENT_BLUE,
     ACCENT_GOLD,
     ACCENT_GREEN,
@@ -50,8 +50,8 @@ from game_constants import (
     TEXT_COLOR,
     VOID_COLOR,
 )
-from game_models import Card, PendingRestore, Player
-from ui_components import Button
+from ui.game_models import Card, PendingRestore, Player
+from ui.ui_components import Button
 
 
 class Game:
@@ -142,7 +142,7 @@ class Game:
             self.start_turn(initial=True)
 
     def load_card_images(self) -> dict[str, pygame.Surface]:
-        image_dir = os.path.join(os.path.dirname(__file__), "card_image")
+        image_dir = os.path.join(os.path.dirname(__file__), "assets/card_image")
         image_map = {
             "Force 50N": "impluse.png",
             "Force 75N": "momentum.png",
@@ -161,7 +161,7 @@ class Game:
         return loaded_images
 
     def load_card_back_image(self) -> Optional[pygame.Surface]:
-        image_dir = os.path.join(os.path.dirname(__file__), "card_image")
+        image_dir = os.path.join(os.path.dirname(__file__), "assets/card_image")
         for filename in ("back_card.jpg", "back_card.png"):
             image_path = os.path.join(image_dir, filename)
             if os.path.exists(image_path):
@@ -559,6 +559,7 @@ class Game:
             "effect_cards": list(self.turn_effect_cards),
             "enemy_response": "No dodge response",
             "force": card.force,
+            "direction": direction,
             "friction": self.stage_friction,
             "mass": PLAYER_MASS,
             "gravity": GRAVITY,
@@ -708,6 +709,8 @@ class Game:
         context = dict(self.pending_education_context)
         if motions:
             context["motions"] = [self.motion_to_summary(motion) for motion in motions]
+        if followup_distance > 0:
+            context["followup_distance"] = followup_distance
         self.pending_education_context = None
         return context
 
@@ -722,7 +725,7 @@ class Game:
             "body": None,
             "context": dict(context),
             "summary": build_interaction_summary(context),
-            "markdown_body": None,
+            "replay": None,
         }
 
         prompt = build_physics_prompt(context)
@@ -733,11 +736,11 @@ class Game:
                 result = request_gemini_explanation(prompt)
             except Exception as exc:  # noqa: BLE001
                 result = fallback_text + f"\n\nGemini fallback reason: {exc}"
-            markdown_body = build_markdown_document(context, result)
+            replay_payload = self.build_education_replay_payload(context, result)
             if self.education_generation and self.education_generation.get("request_id") == request_id:
                 self.education_generation["status"] = "ready"
                 self.education_generation["body"] = result
-                self.education_generation["markdown_body"] = markdown_body
+                self.education_generation["replay"] = replay_payload
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -756,13 +759,14 @@ class Game:
             "body": self.education_generation["body"] or "",
             "context": dict(self.education_generation.get("context") or {}),
             "summary": dict(self.education_generation.get("summary") or {}),
-            "markdown_body": self.education_generation.get("markdown_body") or "",
+            "replay": dict(self.education_generation.get("replay") or {}),
             "view": "summary",
             "opened_ticks": pygame.time.get_ticks(),
             "flip_duration": 620,
             "flip_state": "back",
             "flip_target": "front",
             "flip_started_ticks": None,
+            "replay_started_ticks": None,
         }
         self.education_generation = None
 
@@ -794,8 +798,28 @@ class Game:
         link_rect.topleft = (panel.x + 34, panel.y + 92)
         return link_rect
 
+    def build_education_replay_payload(self, context: dict, explanation_text: str) -> dict:
+        sections = extract_explanation_sections(explanation_text)
+        return {
+            "physics_breakdown": sections.get("Physics Breakdown", "") or "Force creates acceleration and friction resists motion.",
+            "calculation": sections.get("Calculation", "") or "Use F = ma and friction = mu * m * g to estimate the motion.",
+            "what_happened": sections.get("What Happened", "") or context.get("outcome", "The action resolved in the arena."),
+            "direction": float(context.get("direction", 1.0)),
+            "force": float(context.get("force", 0.0)),
+            "friction": float(context.get("friction", 0.0)),
+            "enemy_response": str(context.get("enemy_response", "")),
+            "motions": list(context.get("motions") or []),
+            "followup_distance": float(context.get("followup_distance", 0.0) or 0.0),
+            "actor": str(context.get("actor", "p1")),
+            "target": str(context.get("target", "p2")),
+            "effect_cards": list(context.get("effect_cards") or []),
+            "action_card": str(context.get("action_card", "")),
+        }
+
     def scroll_education_popup(self, amount: int) -> None:
         if self.education_popup is None:
+            return
+        if self.education_popup.get("view") == "replay":
             return
         self.education_scroll_offset = max(0, self.education_scroll_offset + amount)
 
@@ -809,14 +833,15 @@ class Game:
         if self.education_popup["flip_state"] == "front" and self.education_popup.get("view") == "summary":
             link_rect = self.education_markdown_link_rect(panel)
             if link_rect.collidepoint(pos):
-                self.education_popup["view"] = "markdown"
-                self.education_scroll_offset = 0
+                self.education_popup["view"] = "replay"
+                self.education_popup["replay_started_ticks"] = pygame.time.get_ticks()
                 return True
-        if self.education_popup["flip_state"] == "front" and self.education_popup.get("view") == "markdown":
+        if self.education_popup["flip_state"] == "front" and self.education_popup.get("view") == "replay":
             back_rect = self.education_summary_link_rect(panel)
             if back_rect.collidepoint(pos):
                 self.education_popup["view"] = "summary"
                 self.education_scroll_offset = 0
+                self.education_popup["replay_started_ticks"] = None
                 return True
         if panel.collidepoint(pos):
             if self.education_popup["flip_state"] == "back":
@@ -866,8 +891,8 @@ class Game:
             show_front = self.education_popup["flip_state"] == "front"
 
         if show_front:
-            if self.education_popup.get("view") == "markdown":
-                card_surface = self.render_education_markdown(panel.size, exit_rect)
+            if self.education_popup.get("view") == "replay":
+                card_surface = self.render_education_replay(panel.size, exit_rect)
             else:
                 card_surface = self.render_education_front(panel.size, exit_rect)
         else:
@@ -898,14 +923,14 @@ class Game:
         self.education_exit_button.draw(surface, self.small_font, True)
         return surface
 
-    def render_education_markdown(self, size: tuple[int, int], exit_rect: pygame.Rect) -> pygame.Surface:
+    def render_education_replay(self, size: tuple[int, int], exit_rect: pygame.Rect) -> pygame.Surface:
         surface = pygame.Surface(size, pygame.SRCALPHA)
         rect = surface.get_rect()
         pygame.draw.rect(surface, (8, 22, 52, 245), rect, border_radius=28)
         pygame.draw.rect(surface, (88, 196, 255, 220), rect, width=3, border_radius=28)
 
-        title = self.hero_font.render("Physics Behind It", True, TEXT_COLOR)
-        subtitle = self.small_font.render("Gemini markdown explanation", True, MUTED_COLOR)
+        title = self.hero_font.render("Physics Replay", True, TEXT_COLOR)
+        subtitle = self.small_font.render("Replay with subtitles and vectors", True, MUTED_COLOR)
         surface.blit(title, (34, 28))
         surface.blit(subtitle, (36, 72))
 
@@ -914,35 +939,139 @@ class Game:
         surface.blit(back_text, back_rect.topleft)
         pygame.draw.line(surface, ACCENT_BLUE, (back_rect.x, back_rect.bottom + 2), (back_rect.right, back_rect.bottom + 2), 1)
 
-        content_rect = pygame.Rect(34, 126, rect.width - 68, rect.height - 190)
-        pygame.draw.rect(surface, (7, 18, 40), content_rect, border_radius=20)
-        pygame.draw.rect(surface, CARD_BORDER, content_rect, width=1, border_radius=20)
+        arena_rect = pygame.Rect(34, 126, rect.width - 68, 210)
+        subtitle_rect = pygame.Rect(34, 350, rect.width - 68, 94)
+        pygame.draw.rect(surface, (7, 18, 40), arena_rect, border_radius=20)
+        pygame.draw.rect(surface, CARD_BORDER, arena_rect, width=1, border_radius=20)
+        pygame.draw.rect(surface, (7, 18, 40), subtitle_rect, border_radius=18)
+        pygame.draw.rect(surface, CARD_BORDER, subtitle_rect, width=1, border_radius=18)
 
-        markdown_body = self.education_popup.get("markdown_body", "")
-        content_surface = pygame.Surface((content_rect.width - 30, 2600), pygame.SRCALPHA)
-        content_y = self.render_supported_markdown_content(content_surface, content_rect, str(markdown_body))
+        replay = dict(self.education_popup.get("replay") or {})
+        if self.education_popup.get("replay_started_ticks") is None:
+            self.education_popup["replay_started_ticks"] = pygame.time.get_ticks()
+        replay_elapsed = (pygame.time.get_ticks() - self.education_popup["replay_started_ticks"]) / 1000.0
+        replay_duration = 6.0
+        replay_progress = (replay_elapsed % replay_duration) / replay_duration
 
-        visible_height = content_rect.height - 24
-        max_scroll = max(0, content_y - visible_height)
-        self.education_scroll_offset = min(self.education_scroll_offset, max_scroll)
-        clip = pygame.Rect(0, self.education_scroll_offset, content_rect.width - 30, visible_height)
-        surface.blit(content_surface, (content_rect.x + 14, content_rect.y + 12), area=clip)
+        left_x = arena_rect.x + 118
+        right_x = arena_rect.right - 118
+        lane_y = arena_rect.centery + 16
+        radius = 16
+        direction = 1 if float(replay.get("direction", 1.0)) >= 0 else -1
+        actor_on_left = direction > 0
+        actor_start_x = left_x if actor_on_left else right_x
+        target_start_x = right_x if actor_on_left else left_x
+        actor_x = float(actor_start_x)
+        target_x = float(target_start_x)
+        actor_y = float(lane_y)
+        target_y = float(lane_y)
+        contact_x = target_x - direction * (radius * 2 + 10)
+        enemy_response = str(replay.get("enemy_response", "")).lower()
+        motions = list(replay.get("motions") or [])
+        main_motion = motions[0] if motions else {}
+        main_distance = float(main_motion.get("distance", 0.0) or 0.0)
+        motion_px = min(220.0, main_distance * 34.0)
+        followup_distance = float(replay.get("followup_distance", 0.0) or 0.0)
+        followup_px = min(140.0, followup_distance * 34.0)
 
-        if max_scroll > 0:
-            track_rect = pygame.Rect(content_rect.right - 12, content_rect.y + 16, 6, content_rect.height - 32)
-            pygame.draw.rect(surface, (15, 44, 78), track_rect, border_radius=3)
-            thumb_height = max(42, int(track_rect.height * (visible_height / max(content_y, 1))))
-            thumb_y = track_rect.y + int((track_rect.height - thumb_height) * (self.education_scroll_offset / max(max_scroll, 1)))
-            thumb_rect = pygame.Rect(track_rect.x, thumb_y, track_rect.width, thumb_height)
-            pygame.draw.rect(surface, ACCENT_BLUE, thumb_rect, border_radius=3)
+        if replay_progress < 0.24:
+            actor_x = actor_start_x + (contact_x - actor_start_x) * (replay_progress / 0.24)
+            subtitle_text = str(replay.get("physics_breakdown", "Force is applied toward the opponent."))
+        elif replay_progress < 0.58:
+            actor_x = contact_x
+            if enemy_response == "dodge success":
+                dodge_progress = (replay_progress - 0.24) / 0.34
+                target_y = lane_y - math.sin(dodge_progress * math.pi) * 44.0
+                actor_x = contact_x + direction * motion_px * dodge_progress
+            else:
+                hit_progress = (replay_progress - 0.24) / 0.34
+                target_x = target_start_x + direction * motion_px * hit_progress
+            subtitle_text = str(replay.get("calculation", "The force and friction values determine the motion."))
+        else:
+            settle_progress = (replay_progress - 0.58) / 0.42
+            if enemy_response == "dodge success":
+                actor_x = contact_x + direction * motion_px
+                target_y = lane_y
+            else:
+                target_x = target_start_x + direction * motion_px
+                actor_x = contact_x + direction * min(followup_px, motion_px * 0.75) * settle_progress
+            subtitle_text = str(replay.get("what_happened", "The action resolves in the arena."))
 
-        hint = self.small_font.render("Use mouse wheel to scroll the explanation.", True, MUTED_COLOR)
+        pygame.draw.line(surface, ACCENT_GOLD, (arena_rect.x + 28, lane_y), (arena_rect.right - 28, lane_y), 2)
+        pygame.draw.circle(surface, ACCENT_BLUE if replay.get("actor") == "p1" else ACCENT_RED, (int(actor_x), int(actor_y)), radius)
+        pygame.draw.circle(surface, TEXT_COLOR, (int(actor_x), int(actor_y)), radius, 2)
+        pygame.draw.circle(surface, ACCENT_RED if replay.get("target") == "p2" else ACCENT_BLUE, (int(target_x), int(target_y)), radius)
+        pygame.draw.circle(surface, TEXT_COLOR, (int(target_x), int(target_y)), radius, 2)
+
+        actor_name = self.small_font.render(str(replay.get("actor", "p1")).upper(), True, TEXT_COLOR)
+        target_name = self.small_font.render(str(replay.get("target", "p2")).upper(), True, TEXT_COLOR)
+        surface.blit(actor_name, actor_name.get_rect(center=(int(actor_x), int(actor_y) - 30)))
+        surface.blit(target_name, target_name.get_rect(center=(int(target_x), int(target_y) - 30)))
+
+        force_label = f"{int(float(replay.get('force', 0.0) or 0.0))}N"
+        self.draw_replay_vector(surface, (int(actor_x), int(actor_y) - 28), (int(actor_x + direction * 90), int(actor_y - 28)), force_label, ACCENT_BLUE)
+
+        if enemy_response == "dodge success":
+            self.draw_replay_vector(surface, (int(target_x), int(target_y)), (int(target_x), int(target_y - 58)), "Dodge", ACCENT_GREEN)
+            self.draw_replay_vector(surface, (int(actor_x), int(actor_y) + 28), (int(actor_x + direction * 78), int(actor_y + 28)), "Momentum", ACCENT_GOLD)
+        else:
+            self.draw_replay_vector(surface, (int(target_x), int(target_y) - 28), (int(target_x + direction * 80), int(target_y - 28)), "Velocity", ACCENT_RED)
+            friction_dir = -direction if main_distance > 0 else 0
+            if friction_dir:
+                self.draw_replay_vector(
+                    surface,
+                    (int(target_x), int(target_y) + 30),
+                    (int(target_x + friction_dir * 74), int(target_y + 30)),
+                    f"Friction {float(replay.get('friction', 0.0)):.2f}",
+                    MUTED_COLOR,
+                )
+            if followup_distance > 0 and replay_progress >= 0.58:
+                self.draw_replay_vector(surface, (int(actor_x), int(actor_y) + 54), (int(actor_x + direction * 64), int(actor_y) + 54), "Follow-up", ACCENT_GOLD)
+
+        progress_rect = pygame.Rect(arena_rect.x + 26, arena_rect.bottom - 18, arena_rect.width - 52, 8)
+        pygame.draw.rect(surface, (16, 46, 92), progress_rect, border_radius=4)
+        fill_rect = progress_rect.copy()
+        fill_rect.width = max(8, int(progress_rect.width * replay_progress))
+        pygame.draw.rect(surface, ACCENT_BLUE, fill_rect, border_radius=4)
+
+        wrapped = self.wrap_text(subtitle_text, self.small_font, subtitle_rect.width - 28, 4)
+        subtitle_y = subtitle_rect.y + 18
+        for line in wrapped:
+            rendered = self.small_font.render(line, True, TEXT_COLOR)
+            surface.blit(rendered, rendered.get_rect(center=(subtitle_rect.centerx, subtitle_y)))
+            subtitle_y += 22
+
+        hint = self.small_font.render("Replay loops automatically. Click Back To Card to return.", True, MUTED_COLOR)
         surface.blit(hint, (34, rect.bottom - 56))
 
         local_exit_rect = pygame.Rect(exit_rect.x - rect.x, exit_rect.y - rect.y, exit_rect.width, exit_rect.height)
         self.education_exit_button.rect = local_exit_rect
         self.education_exit_button.draw(surface, self.small_font, True)
         return surface
+
+    def draw_replay_vector(
+        self,
+        surface: pygame.Surface,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        label: str,
+        color: tuple[int, int, int],
+    ) -> None:
+        pygame.draw.line(surface, color, start, end, 3)
+        angle = math.atan2(end[1] - start[1], end[0] - start[0])
+        arrow_len = 12
+        left = (
+            end[0] - arrow_len * math.cos(angle - math.pi / 6),
+            end[1] - arrow_len * math.sin(angle - math.pi / 6),
+        )
+        right = (
+            end[0] - arrow_len * math.cos(angle + math.pi / 6),
+            end[1] - arrow_len * math.sin(angle + math.pi / 6),
+        )
+        pygame.draw.polygon(surface, color, [end, left, right])
+        label_surface = self.tiny_font.render(label, True, color)
+        label_rect = label_surface.get_rect(center=((start[0] + end[0]) // 2, (start[1] + end[1]) // 2 - 12))
+        surface.blit(label_surface, label_rect)
 
     def draw_back_card_on_surface(self, surface: pygame.Surface, rect: pygame.Rect, alpha: int) -> None:
         if self.card_back_image is not None:
@@ -1773,9 +1902,9 @@ class Game:
                 self.draw_info_screen(
                     "About Us",
                     [
-                        "Physics Card Duel is a local pygame prototype built from your physics setting.",
-                        "It mixes force, friction, energy management, and positional play into a PvP card duel.",
-                        "The project is designed as a playable learning game with a strong visual card focus.",
+                        "Jack, Designer of Newton's Edge",
+                        "Dior, Full-stack developer of Newton's Edge",
+                        "Fred, Presentor of Newton's Edge",
                     ],
                 )
             pygame.display.flip()

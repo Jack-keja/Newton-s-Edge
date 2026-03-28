@@ -5,7 +5,7 @@ import urllib.error
 import urllib.request
 
 try:
-    from gemini_config import GEMINI_API_KEY
+    from education_function.gemini_config import GEMINI_API_KEY
 except ImportError:
     GEMINI_API_KEY = ""
 

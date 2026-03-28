@@ -167,3 +167,29 @@ def build_markdown_document(context: dict[str, Any], gemini_text: str) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def extract_explanation_sections(text: str) -> dict[str, str]:
+    sections = {
+        "Physics Breakdown": "",
+        "Calculation": "",
+        "What Happened": "",
+    }
+    current_key: str | None = None
+    for raw_line in str(text).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        matched = False
+        for key in sections:
+            prefix = f"{key}:"
+            if line.startswith(prefix):
+                current_key = key
+                sections[key] = line[len(prefix):].strip()
+                matched = True
+                break
+        if matched:
+            continue
+        if current_key is not None:
+            sections[current_key] = (sections[current_key] + " " + line).strip()
+    return sections

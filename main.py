@@ -1,11 +1,14 @@
 import math
 import os
 import random
+import threading
 from typing import List, Optional
 
 import pygame
 
 from card_factory import build_opening_hand, draw_random_card
+from education import build_local_explanation, build_physics_prompt
+from gemini_education import request_gemini_explanation
 from game_constants import (
     ACCENT_BLUE,
     ACCENT_GOLD,
@@ -67,9 +70,11 @@ class Game:
         self.end_turn_button = Button(pygame.Rect(1040, 680, 200, 58), "End Turn")
         self.reset_button = Button(pygame.Rect(1040, 612, 200, 50), "Restart Match")
         self.log_button = Button(pygame.Rect(0, 0, 180, 42), "Battle Log")
+        self.education_toggle_button = Button(pygame.Rect(0, 0, 180, 40), "Education: On")
         self.log_prev_button = Button(pygame.Rect(0, 0, 130, 40), "Previous")
         self.log_next_button = Button(pygame.Rect(0, 0, 130, 40), "Next")
         self.log_close_button = Button(pygame.Rect(0, 0, 130, 40), "Close")
+        self.education_exit_button = Button(pygame.Rect(0, 0, 130, 40), "Exit")
         self.menu_buttons = {
             "play": Button(pygame.Rect(0, 0, 260, 58), "Play"),
             "instruction": Button(pygame.Rect(0, 0, 260, 58), "Instruction"),
@@ -80,6 +85,7 @@ class Game:
         self.transition = None
         self.card_images = self.load_card_images()
         self.card_back_image = self.load_card_back_image()
+        self.education_enabled = True
         self.initialize_match()
 
     def initialize_match(self, animated_setup: bool = False) -> None:
@@ -112,6 +118,13 @@ class Game:
         self.card_rects = []
         self.board_rect = pygame.Rect(0, 0, 0, 0)
         self.side_order = 1 if self.players[0].position <= self.players[1].position else -1
+        self.turn_effect_cards: List[str] = []
+        self.pending_education_context = None
+        self.queued_education_context = None
+        self.education_popup = None
+        self.education_generation = None
+        self.education_scroll_offset = 0
+        self.education_request_counter = 0
         if animated_setup:
             self.turn_phase = "dealing"
             self.opening_hands = [build_opening_hand(START_HAND) for _ in self.players]
@@ -358,6 +371,10 @@ class Game:
         self.effect_used_this_turn = False
         self.conservation_used_this_turn = False
         self.action_used_this_turn = False
+        self.turn_effect_cards = []
+        self.pending_education_context = None
+        self.queued_education_context = None
+        self.education_generation = None
         self.turn_phase = "playing"
 
         if not player.has_started_turn:
@@ -413,6 +430,8 @@ class Game:
     def can_play(self, player: Player, card: Card) -> bool:
         if (
             self.log_view_open
+            or self.education_popup is not None
+            or self.education_generation is not None
             or self.animation
             or self.deal_sequence
             or self.card_use_animation
@@ -435,12 +454,12 @@ class Game:
         return player.hand.pop(index)
 
     def play_selected_card(self) -> None:
-        if self.selected_card_index is None or self.log_view_open or self.animation or self.card_use_animation or self.winner is not None:
+        if self.selected_card_index is None or self.log_view_open or self.education_popup is not None or self.education_generation is not None or self.animation or self.card_use_animation or self.winner is not None:
             return
         self.play_card_by_index(self.selected_card_index)
 
     def play_card_by_index(self, index: int) -> None:
-        if self.log_view_open or self.animation or self.card_use_animation or self.winner is not None:
+        if self.log_view_open or self.education_popup is not None or self.education_generation is not None or self.animation or self.card_use_animation or self.winner is not None:
             return
         player = self.current_player()
         if index >= len(player.hand):
@@ -465,17 +484,37 @@ class Game:
             player.dodge_ready = True
             self.turn_phase = "turn_complete"
             self.log(f"{player.name} prepares a dodge. If no shove comes, it fizzles harmlessly.")
+            self.open_education_popup(
+                {
+                    "actor": player.name,
+                    "target": self.other_player().name,
+                    "action_card": card.name,
+                    "action_kind": card.kind,
+                    "effect_cards": list(self.turn_effect_cards),
+                    "enemy_response": "No immediate enemy response",
+                    "force": card.force,
+                    "friction": self.stage_friction,
+                    "mass": PLAYER_MASS,
+                    "gravity": GRAVITY,
+                    "impact_time": IMPACT_TIME,
+                    "outcome": "The player stored a dodge state for the next incoming shove and did not create immediate linear motion.",
+                    "motions": [],
+                }
+            )
         elif card.kind == "conservation":
             self.conservation_used_this_turn = True
             self.effect_used_this_turn = True
+            self.turn_effect_cards.append(card.name)
             self.resolve_conservation()
         elif card.kind == "smooth":
             self.effect_used_this_turn = True
+            self.turn_effect_cards.append(card.name)
             old = self.stage_friction
             self.stage_friction = max(0.0, self.stage_friction - 0.05)
             self.log(f"{player.name} smooths the arena. Friction {old:.2f} -> {self.stage_friction:.2f}.")
         elif card.kind == "rough":
             self.effect_used_this_turn = True
+            self.turn_effect_cards.append(card.name)
             old = self.stage_friction
             self.stage_friction = min(1.0, self.stage_friction + 0.10)
             self.log(f"{player.name} roughens the arena. Friction {old:.2f} -> {self.stage_friction:.2f}.")
@@ -505,6 +544,21 @@ class Game:
         attacker = self.current_player()
         defender = self.other_player()
         direction = self.attack_direction(self.current_player_index, self.other_player_index())
+        self.pending_education_context = {
+            "actor": attacker.name,
+            "target": defender.name,
+            "action_card": card.name,
+            "action_kind": card.kind,
+            "effect_cards": list(self.turn_effect_cards),
+            "enemy_response": "No dodge response",
+            "force": card.force,
+            "friction": self.stage_friction,
+            "mass": PLAYER_MASS,
+            "gravity": GRAVITY,
+            "impact_time": IMPACT_TIME,
+            "outcome": "",
+            "motions": [],
+        }
         if direction > 0:
             attacker.position = min(attacker.position if defender.position <= attacker.position else defender.position - PUSH_CONTACT_GAP, STAGE_LENGTH)
         else:
@@ -521,6 +575,13 @@ class Game:
             defender.dodge_ready = False
             success_chance = FORCE_SUCCESS[int(card.force)]
             if random.random() <= success_chance:
+                stumble_motion = self.build_motion_profile(self.current_player_index, direction, card.force)
+                if self.pending_education_context is not None:
+                    self.pending_education_context["enemy_response"] = "Dodge success"
+                    self.pending_education_context["outcome"] = (
+                        f"{defender.name} avoided the shove, so {attacker.name} kept moving and stumbled past under friction."
+                    )
+                    self.pending_education_context["motions"] = [self.motion_to_summary(stumble_motion)]
                 self.log(
                     f"{defender.name} dodges {attacker.name}'s {int(card.force)}N shove. "
                     f"{attacker.name} stumbles forward instead."
@@ -531,13 +592,22 @@ class Game:
                     "Dodge success",
                 )
                 return
+            if self.pending_education_context is not None:
+                self.pending_education_context["enemy_response"] = "Dodge failed"
             self.log(f"{defender.name}'s dodge fails against {int(card.force)}N.")
+        elif self.pending_education_context is not None:
+            self.pending_education_context["enemy_response"] = "No dodge used"
 
         self.log(
             f"{attacker.name} launches a {int(card.force)}N shove. "
             f"{defender.name} is pushed away and {attacker.name} follows through."
         )
         defender_motion = self.build_motion_profile(self.other_player_index(), direction, card.force)
+        if self.pending_education_context is not None:
+            self.pending_education_context["outcome"] = (
+                f"{defender.name} was pushed across the arena while {attacker.name} followed into the new space."
+            )
+            self.pending_education_context["motions"] = [self.motion_to_summary(defender_motion)]
         target_position = defender_motion["end_pos"] - direction * FOLLOW_GAP
         target_position = max(0.0, min(STAGE_LENGTH, target_position))
         if direction > 0:
@@ -616,6 +686,270 @@ class Game:
             "start_ticks": pygame.time.get_ticks(),
         }
 
+    def motion_to_summary(self, motion: dict) -> dict:
+        return {
+            "subject": self.players[motion["player_index"]].name,
+            "distance": abs(motion["end_pos"] - motion["start_pos"]),
+            "initial_velocity": motion["initial_velocity"],
+            "friction_accel": motion["friction_accel"],
+            "duration": motion["duration"],
+        }
+
+    def finalize_education_context(self, motions: List[dict], followup_distance: float = 0.0) -> Optional[dict]:
+        if self.pending_education_context is None:
+            return None
+        context = dict(self.pending_education_context)
+        if motions:
+            context["motions"] = [self.motion_to_summary(motion) for motion in motions]
+        if followup_distance > 0:
+            context["outcome"] += f" Follow-up distance: {followup_distance:.2f} m."
+        self.pending_education_context = None
+        return context
+
+    def open_education_popup(self, context: dict) -> None:
+        if not self.education_enabled:
+            return
+        self.education_request_counter += 1
+        request_id = self.education_request_counter
+        self.education_generation = {
+            "request_id": request_id,
+            "status": "loading",
+            "body": None,
+            "context": dict(context),
+        }
+
+        prompt = build_physics_prompt(context)
+        fallback_text = build_local_explanation(context)
+
+        def worker() -> None:
+            try:
+                result = request_gemini_explanation(prompt)
+            except Exception as exc:  # noqa: BLE001
+                result = fallback_text + f"\n\nGemini fallback reason: {exc}"
+            if self.education_generation and self.education_generation.get("request_id") == request_id:
+                self.education_generation["status"] = "ready"
+                self.education_generation["body"] = result
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def update_education_generation(self) -> None:
+        if not self.education_enabled:
+            self.education_generation = None
+            return
+        if self.education_generation is None:
+            return
+        if self.education_generation["status"] != "ready":
+            return
+        self.education_scroll_offset = 0
+        self.education_popup = {
+            "request_id": self.education_generation["request_id"],
+            "title": "What happened?",
+            "body": self.education_generation["body"] or "",
+            "context": dict(self.education_generation.get("context") or {}),
+            "opened_ticks": pygame.time.get_ticks(),
+            "flip_duration": 620,
+            "flip_state": "back",
+            "flip_target": "front",
+            "flip_started_ticks": None,
+        }
+        self.education_generation = None
+
+    def close_education_popup(self) -> None:
+        self.education_popup = None
+        self.education_scroll_offset = 0
+
+    def set_education_enabled(self, enabled: bool) -> None:
+        self.education_enabled = enabled
+        self.education_toggle_button.label = "Education: On" if enabled else "Education: Off"
+        if not enabled:
+            self.pending_education_context = None
+            self.queued_education_context = None
+            self.education_generation = None
+            self.close_education_popup()
+
+    def toggle_education_enabled(self) -> None:
+        self.set_education_enabled(not self.education_enabled)
+
+    def scroll_education_popup(self, amount: int) -> None:
+        if self.education_popup is None:
+            return
+        self.education_scroll_offset = max(0, self.education_scroll_offset + amount)
+
+    def handle_education_click(self, pos) -> bool:
+        if self.education_popup is None:
+            return False
+        panel, exit_rect = self.education_layout()
+        if exit_rect.collidepoint(pos):
+            self.close_education_popup()
+            return True
+        if panel.collidepoint(pos):
+            if self.education_popup["flip_state"] == "back":
+                self.education_popup["flip_state"] = "animating"
+                self.education_popup["flip_target"] = "front"
+                self.education_popup["flip_started_ticks"] = pygame.time.get_ticks()
+            elif self.education_popup["flip_state"] == "front":
+                self.education_popup["flip_state"] = "animating"
+                self.education_popup["flip_target"] = "back"
+                self.education_popup["flip_started_ticks"] = pygame.time.get_ticks()
+            return True
+        return True
+
+    def education_layout(self) -> tuple[pygame.Rect, pygame.Rect]:
+        panel = pygame.Rect(0, 0, 900, 620)
+        panel.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+        exit_rect = pygame.Rect(panel.right - 164, panel.bottom - 62, 130, 40)
+        return panel, exit_rect
+
+    def draw_education_popup(self) -> None:
+        if self.education_popup is None:
+            return
+
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((1, 8, 18, 188))
+        self.screen.blit(overlay, (0, 0))
+
+        panel, exit_rect = self.education_layout()
+        flip_state = self.education_popup["flip_state"]
+        flip_target = self.education_popup["flip_target"]
+        if flip_state == "animating":
+            flip_elapsed = pygame.time.get_ticks() - self.education_popup["flip_started_ticks"]
+            flip_progress = min(1.0, flip_elapsed / self.education_popup["flip_duration"])
+            if flip_progress >= 1.0:
+                self.education_popup["flip_state"] = flip_target
+                self.education_popup["flip_started_ticks"] = None
+                flip_state = flip_target
+                flip_progress = 1.0
+        else:
+            flip_progress = 1.0 if flip_state == "front" else 0.0
+
+        flip_angle = flip_progress * math.pi
+        width_scale = max(0.05, abs(math.cos(flip_angle)))
+        if self.education_popup["flip_state"] == "animating":
+            show_front = flip_progress >= 0.5
+        else:
+            show_front = self.education_popup["flip_state"] == "front"
+
+        if show_front:
+            card_surface = self.render_education_front(panel.size, exit_rect)
+        else:
+            card_surface = self.render_education_back(panel.size, exit_rect)
+
+        scaled_width = max(18, int(panel.width * width_scale))
+        scaled_surface = pygame.transform.smoothscale(card_surface, (scaled_width, panel.height))
+        scaled_rect = scaled_surface.get_rect(center=panel.center)
+        self.screen.blit(scaled_surface, scaled_rect.topleft)
+
+        if scaled_width < 42:
+            edge_rect = pygame.Rect(0, 0, 10, panel.height - 18)
+            edge_rect.center = panel.center
+            edge_surface = pygame.Surface((edge_rect.width, edge_rect.height), pygame.SRCALPHA)
+            pygame.draw.rect(edge_surface, (142, 230, 255, 220), edge_surface.get_rect(), border_radius=6)
+            self.screen.blit(edge_surface, edge_rect.topleft)
+
+    def render_education_back(self, size: tuple[int, int], exit_rect: pygame.Rect) -> pygame.Surface:
+        surface = pygame.Surface(size, pygame.SRCALPHA)
+        rect = surface.get_rect()
+        pygame.draw.rect(surface, (8, 22, 52, 245), rect, border_radius=28)
+        pygame.draw.rect(surface, (88, 196, 255, 220), rect, width=3, border_radius=28)
+        context = self.education_popup.get("context", {})
+        effect_cards = list(context.get("effect_cards") or [])
+        action_card = context.get("action_card")
+        if action_card:
+            effect_cards.append(action_card)
+        actor_name = str(context.get("actor", "p1")).upper()
+        target_name = str(context.get("target", "p2")).upper()
+        actor_text = f"{actor_name}: {' + '.join(effect_cards) if effect_cards else 'Action'}"
+
+        enemy_response = str(context.get("enemy_response", "")).lower()
+        reaction_text = f"{target_name}: Dodge" if "dodge" in enemy_response else None
+        actor_lines = self.wrap_text(actor_text, self.body_font, rect.width - 160, 4)
+        reaction_lines = self.wrap_text(reaction_text, self.body_font, rect.width - 160, 2) if reaction_text else []
+
+        y = rect.y + 150
+        for line in actor_lines:
+            text = self.body_font.render(line, True, TEXT_COLOR)
+            surface.blit(text, text.get_rect(center=(rect.centerx, y)))
+            y += 32
+
+        if reaction_lines:
+            plus = self.title_font.render("+", True, ACCENT_BLUE)
+            surface.blit(plus, plus.get_rect(center=(rect.centerx, y + 18)))
+            y += 56
+            for line in reaction_lines:
+                text = self.body_font.render(line, True, TEXT_COLOR)
+                surface.blit(text, text.get_rect(center=(rect.centerx, y)))
+                y += 32
+
+        equation = self.hero_font.render("= What Happen?", True, TEXT_COLOR)
+        surface.blit(equation, equation.get_rect(center=(rect.centerx, rect.bottom - 152)))
+
+        local_exit_rect = pygame.Rect(exit_rect.x - rect.x, exit_rect.y - rect.y, exit_rect.width, exit_rect.height)
+        self.education_exit_button.rect = local_exit_rect
+        self.education_exit_button.draw(surface, self.small_font, True)
+        return surface
+
+    def draw_back_card_on_surface(self, surface: pygame.Surface, rect: pygame.Rect, alpha: int) -> None:
+        if self.card_back_image is not None:
+            image = pygame.transform.smoothscale(self.card_back_image, (rect.width, rect.height))
+            if alpha < 255:
+                image = image.copy()
+                image.set_alpha(alpha)
+            surface.blit(image, rect.topleft)
+            return
+        pygame.draw.rect(surface, (*CARD_BG, alpha), rect, border_radius=22)
+        pygame.draw.rect(surface, (*CARD_BORDER, alpha), rect, width=3, border_radius=22)
+
+    def render_education_front(self, size: tuple[int, int], exit_rect: pygame.Rect) -> pygame.Surface:
+        surface = pygame.Surface(size, pygame.SRCALPHA)
+        rect = surface.get_rect()
+        pygame.draw.rect(surface, (8, 22, 52, 245), rect, border_radius=28)
+        pygame.draw.rect(surface, (88, 196, 255, 220), rect, width=3, border_radius=28)
+
+        title = self.hero_font.render("Details", True, TEXT_COLOR)
+        subtitle = self.small_font.render("Gemini explanation of the resolved action", True, MUTED_COLOR)
+        surface.blit(title, (34, 28))
+        surface.blit(subtitle, (36, 92))
+
+        content_rect = pygame.Rect(34, 132, rect.width - 68, rect.height - 210)
+        pygame.draw.rect(surface, (7, 18, 40), content_rect, border_radius=20)
+        pygame.draw.rect(surface, CARD_BORDER, content_rect, width=1, border_radius=20)
+
+        body = self.education_popup["body"]
+        content_surface = pygame.Surface((content_rect.width - 30, 2400), pygame.SRCALPHA)
+        content_y = 0
+        for paragraph in body.splitlines() or [""]:
+            if not paragraph.strip():
+                content_y += 16
+                continue
+            wrapped = self.wrap_text(paragraph, self.small_font, content_rect.width - 58, 12)
+            for line in wrapped:
+                text = self.small_font.render(line, True, TEXT_COLOR)
+                content_surface.blit(text, (8, content_y))
+                content_y += 25
+            content_y += 8
+
+        visible_height = content_rect.height - 24
+        max_scroll = max(0, content_y - visible_height)
+        self.education_scroll_offset = min(self.education_scroll_offset, max_scroll)
+        clip = pygame.Rect(0, self.education_scroll_offset, content_rect.width - 30, visible_height)
+        surface.blit(content_surface, (content_rect.x + 14, content_rect.y + 12), area=clip)
+
+        if max_scroll > 0:
+            track_rect = pygame.Rect(content_rect.right - 12, content_rect.y + 16, 6, content_rect.height - 32)
+            pygame.draw.rect(surface, (15, 44, 78), track_rect, border_radius=3)
+            thumb_height = max(42, int(track_rect.height * (visible_height / max(content_y, 1))))
+            thumb_y = track_rect.y + int((track_rect.height - thumb_height) * (self.education_scroll_offset / max(max_scroll, 1)))
+            thumb_rect = pygame.Rect(track_rect.x, thumb_y, track_rect.width, thumb_height)
+            pygame.draw.rect(surface, ACCENT_BLUE, thumb_rect, border_radius=3)
+
+        close_hint = self.small_font.render("Use mouse wheel to scroll. Click the card to flip back.", True, MUTED_COLOR)
+        surface.blit(close_hint, (34, rect.bottom - 56))
+
+        local_exit_rect = pygame.Rect(exit_rect.x - rect.x, exit_rect.y - rect.y, exit_rect.width, exit_rect.height)
+        self.education_exit_button.rect = local_exit_rect
+        self.education_exit_button.draw(surface, self.small_font, True)
+        return surface
+
     def update_animation(self) -> None:
         if not self.animation:
             return
@@ -644,7 +978,8 @@ class Game:
         if self.animation["type"] == "victory":
             if elapsed < self.animation["duration"]:
                 return
-            self.animation = None
+            self.initialize_match()
+            self.current_screen = "menu"
             return
 
         if self.animation["type"] == "dodge":
@@ -686,6 +1021,9 @@ class Game:
         self.animation = None
         self.check_winner()
         if self.animation and self.animation["type"] == "fall":
+            context = self.finalize_education_context(moved["motions"])
+            if context is not None:
+                self.queued_education_context = context
             return
         if self.winner is None and moved.get("followup"):
             followup = moved["followup"]
@@ -703,10 +1041,16 @@ class Game:
             current_player.position = target_position
             self.check_winner()
             if self.animation and self.animation["type"] == "fall":
+                context = self.finalize_education_context(moved["motions"])
+                if context is not None:
+                    self.queued_education_context = context
                 return
             if self.winner is None:
                 meters = abs(target_position - start_position)
                 self.log(f"{current_player.name} follows up {meters:.2f}m.")
+                context = self.finalize_education_context(moved["motions"], meters)
+                if context is not None:
+                    self.open_education_popup(context)
             self.turn_phase = "turn_complete"
             return
         if self.winner is None:
@@ -716,6 +1060,9 @@ class Game:
                     f"{self.players[motion['player_index']].name} slides {meters:.2f}m "
                     f"under friction {self.stage_friction:.2f}."
                 )
+            context = self.finalize_education_context(moved["motions"])
+            if context is not None:
+                self.open_education_popup(context)
         self.turn_phase = "turn_complete"
 
     def check_winner(self) -> None:
@@ -741,7 +1088,7 @@ class Game:
                 break
 
     def end_turn(self) -> None:
-        if self.animation or self.winner is not None:
+        if self.animation or self.education_popup is not None or self.education_generation is not None or self.winner is not None:
             return
 
         if self.turn_phase != "turn_complete":
@@ -1145,6 +1492,7 @@ class Game:
         self.end_turn_button.rect = pygame.Rect(SCREEN_WIDTH - 314, SCREEN_HEIGHT - 128, 270, 48)
         self.reset_button.rect = pygame.Rect(SCREEN_WIDTH - 314, SCREEN_HEIGHT - 72, 270, 40)
         self.log_button.rect = pygame.Rect(SCREEN_WIDTH - 314, SCREEN_HEIGHT - 176, 270, 40)
+        self.education_toggle_button.rect = pygame.Rect(SCREEN_WIDTH - 314, SCREEN_HEIGHT - 224, 270, 40)
 
         self.draw_board(board_rect)
         self.draw_header(hud_rect)
@@ -1158,17 +1506,25 @@ class Game:
 
         can_end_turn = (
             not self.log_view_open
+            and self.education_popup is None
+            and self.education_generation is None
             and not self.animation
             and not self.deal_sequence
             and self.winner is None
             and self.turn_phase in {"playing", "turn_complete"}
         )
+        self.education_toggle_button.label = "Education: On" if self.education_enabled else "Education: Off"
+        self.education_toggle_button.draw(self.screen, self.small_font, True)
         self.log_button.draw(self.screen, self.small_font, True)
         self.end_turn_button.draw(self.screen, self.body_font, can_end_turn)
         self.reset_button.draw(self.screen, self.small_font, True)
 
         if self.deal_sequence:
             prompt = "Cards are being dealt. Wait for the draw sequence to finish."
+        elif not self.education_enabled:
+            prompt = "Education mode is off. Toggle it on to see Gemini physics explanations."
+        elif self.education_generation is not None:
+            prompt = "Generating the physics explanation before showing the flip card."
         elif self.selected_card_index is not None and self.turn_phase == "playing":
             prompt = "Drag the selected card into the arena to use it."
         elif self.turn_phase == "turn_complete" and can_end_turn:
@@ -1183,6 +1539,7 @@ class Game:
         self.screen.blit(prompt_text, (28, SCREEN_HEIGHT - 30))
 
         self.draw_victory_cutscene()
+        self.draw_education_popup()
 
         if self.log_view_open:
             self.draw_log_overlay()
@@ -1778,6 +2135,7 @@ class Game:
             self.clock.tick(FPS)
             self.update_card_use_animation()
             self.update_animation()
+            self.update_education_generation()
             self.update_deal_sequence()
             self.update_transition()
 
@@ -1786,7 +2144,9 @@ class Game:
                     running = False
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
-                        if self.current_screen == "game" and self.log_view_open:
+                        if self.current_screen == "game" and self.education_popup is not None:
+                            self.close_education_popup()
+                        elif self.current_screen == "game" and self.log_view_open:
                             self.close_log_view()
                         elif self.current_screen == "game":
                             running = False
@@ -1805,11 +2165,16 @@ class Game:
                     if self.current_screen != "game":
                         self.handle_menu_click(event.pos)
                         continue
+                    if self.education_popup is not None:
+                        self.handle_education_click(event.pos)
+                        continue
                     if self.log_view_open:
                         self.handle_log_click(event.pos)
                         continue
                     if self.reset_button.contains(event.pos):
                         self.restart()
+                    elif self.education_toggle_button.contains(event.pos):
+                        self.toggle_education_enabled()
                     elif self.log_button.contains(event.pos):
                         self.open_log_view()
                     elif self.end_turn_button.contains(event.pos):
@@ -1818,7 +2183,9 @@ class Game:
                     else:
                         self.on_card_click(event.pos)
                 elif event.type == pygame.MOUSEWHEEL:
-                    if self.current_screen == "game" and self.log_view_open:
+                    if self.current_screen == "game" and self.education_popup is not None:
+                        self.scroll_education_popup(-event.y * 36)
+                    elif self.current_screen == "game" and self.log_view_open:
                         self.scroll_log(-event.y * 36)
                 elif event.type == pygame.MOUSEMOTION:
                     if self.drag_state:

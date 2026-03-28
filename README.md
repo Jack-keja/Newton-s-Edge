@@ -13,7 +13,7 @@ The advantage of our game:
 - detailed animation/design of the cards and background of this game
 ## Game Design
 ![Game Screenshot](75N.png)
-
+<img width="709" height="147" alt="Menu" src="https://github.com/Jack-keja/Newton-s-Edge/blob/dc6c5a4cb3d2f1948e4665a0d535598d9ca94cca/game_design/menu.png" />
 
 ## What is in the prototype
 

@@ -79,3 +79,10 @@ python main.py
 - Hands are capped at `6` cards so the UI stays readable.
 - Conservation of Energy restores `3` energy after `3` of the affected player's turns.
 - Friction slows movement after a shove instead of canceling weaker cards completely.
+
+## Links
+Powerpoint link:https://www.canva.com/design/DAHFOKGbWqU/25AXEmTw8w_TrJAMzSpQgw/edit?referrer=https%3A%2F%2Fwww.canva.com%2F<br>
+Video: https://www.bilibili.com/video/BV18nXjBbEC8/?vd_source=6e5c8626e5747cf39485144316360c17<br>
+
+Game link:https://dyeus-wwww.itch.io/newtons-edge
+

@@ -39,7 +39,7 @@ The advantage of our game:
 
 ## What is in the prototype
 
-- Two players start at `12m` and `14m` on a `25m` stage.
+- Two players start around the center of the stage (`11.8m` and `13.8m` on a `25m` stage).
 - Each player begins with `5` energy and `2` random cards.
 - At the start of each new turn, the active player gains `2` energy and draws `2` cards.
 - Players can play any number of effect cards, then one action card.
@@ -55,11 +55,9 @@ The advantage of our game:
 - A player loses by being pushed past `0m` or `25m`.
 
 ## Controls
-
-- Click a card to select it.
-- Click the selected card again, or press `Space`, to play it.
-- Press `Enter`, or click `End Turn`, after the action resolves.
-- Press `R` to restart.
+- Drag the card to the battleground to use it         
+- Click `End Round` to end your turn
+- Press `Restart Game' to reset
 - Press `Esc` to quit.
 
 ## Run

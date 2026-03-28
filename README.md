@@ -1,6 +1,6 @@
-# Void Push
+# Newton's edge
 
-**Void Push** is a turn-based physics strategy card game built with **Python** and **Pygame**.  
+**Newton's edge** is a turn-based physics strategy card game built with **Python** and **Pygame**.  
 The objective is to **push your opponent into the void** before they do the same to you.
 
 This game combines **card-based decision making** with **classical mechanics concepts**, making it both a strategy game and a physics-learning project.
@@ -51,7 +51,7 @@ This game is mainly designed for:
 
 ## Core Idea
 
-Unlike traditional fighting games, **Void Push** focuses on **calculated movement** rather than direct damage.
+Unlike traditional fighting games, **Newton's edge** focuses on **calculated movement** rather than direct damage.
 
 Players do not win by reducing HP.  
 Instead, they win by using physics and strategy to control motion and force the opponent off the stage.

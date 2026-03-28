@@ -10,7 +10,7 @@ import pygame
 from ui.card_factory import build_opening_hand, draw_random_card
 from education_function.education import build_interaction_summary, build_local_explanation, build_physics_prompt, extract_explanation_sections
 from education_function.gemini_education import request_gemini_explanation
-from game_constants import (
+from ui.game_constants import (
     ACCENT_BLUE,
     ACCENT_GOLD,
     ACCENT_GREEN,

@@ -1,7 +1,10 @@
 # Newton's Edge
 
-The purpose of our game:
-One of our team memebers (Dior) finds difficulties of learning abstract physics concepts while he was preparing the AP Physics C: Mechanics.
+The purpose of our game:<br>
+One of our team memebers (Dior) finds difficulties of learning abstract physics concepts while he was preparing the AP Physics C: Mechanics, and he was not alone in this situation.<br>
+Therefore, we are creating a interactive game to help them learning abstract physics concepts with detailed animation<br>
+
+Why Card Games?<br>
 
 
 The advantage of our game:

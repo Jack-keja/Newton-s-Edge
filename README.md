@@ -11,6 +11,9 @@ The advantage of our game:
 - easy access (small app, simple instruction, play immediately)
 - simple rules (easy for new-comers to play the game)
 - detailed animation/design of the cards and background of this game
+## Game Design
+![Game Screenshot](75N.png)
+
 
 ## What is in the prototype
 

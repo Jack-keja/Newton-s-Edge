@@ -2,6 +2,16 @@
 
 A local hot-seat PvP card game built with `pygame`, based on the rules from `Physics.docx`.
 
+The mission/purpose of our game:
+- intertwine the dull reality of physics with an fun and engaging card game.
+- this will help promote high school student who might not find physics intresting an oppertunity to explore this subject which will trigger their future intrest in physics.
+- 
+
+The advantage of our game:
+- easy access (small app, simple instruction, play immediately)
+- simple rules (easy for new-comers to play the game)
+- detailed animation/design of the cards and background of this game
+
 ## What is in the prototype
 
 - Two players start at `12m` and `14m` on a `25m` stage.

@@ -99,4 +99,5 @@ Game link:https://dyeus-wwww.itch.io/newtons-edge
 
 
 
--i Nano Banana is used for designing the cards; Codex OpenAI is used for debugging code.
+#### AI use
+Nano Banana was used for designing the cards; Codex OpenAI was used for syntax and debugging code.

@@ -37,6 +37,12 @@ The advantage of our game:
   <figcaption>Fig. 4: about us pop out window</figcaption>
 </figure>
 
+<figure>
+  <img width="500" height="700" alt="card_design" src="https://github.com/Jack-keja/Newton-s-Edge/blob/544d55f3b23373a424465a40d7e79064f35cec82/game_design/card_design.png" />
+  <figcaption>Fig. 5: card design</figcaption>
+</figure>
+
+
 ## What is in the prototype
 
 - Two players start around the center of the stage (`11.8m` and `13.8m` on a `25m` stage).

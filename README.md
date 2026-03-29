@@ -79,10 +79,24 @@ python main.py
 - Hands are capped at `6` cards so the UI stays readable.
 - Conservation of Energy restores `3` energy after `3` of the affected player's turns.
 - Friction slows movement after a shove instead of canceling weaker cards completely.
+  
+### Poster
+<figure>
+  <img width="709" height="500" alt="about" src="https://github.com/Jack-keja/Newton-s-Edge/blob/7d2e9dee2b559a3b75d7456e32bba4ec01c2d57c/game_design/poster.png" />
+</figure>
 
-## Links
+
+### Short essay:
+
+Newton’s Edge is a PvP card game inspired by the idea that physics can be just as thrilling as any competitive strategy game. Our goal is to help high school students explore core mechanics like force, friction, and Newton’s Laws through interactive gameplay. Two players battle on a 25-meter stage, using energy and cards to shove, dodge, and outplay each other. Instead of relying on simple damage numbers, action cards trigger a short physics simulation with realistic values for mass, friction, and impact time.
+One challenge was balancing realism with fun, since accurate friction and movement could easily make weaker cards useless. We solved this by letting friction slow movement rather than cancel it entirely. We’re proud that the prototype successfully turns physics equations into exciting player decisions. Next, we plan to expand the card pool, improve UI clarity, and add more physics concepts like momentum combos and variable mass.
+
+### Links
 Powerpoint link:https://www.canva.com/design/DAHFOKGbWqU/25AXEmTw8w_TrJAMzSpQgw/edit?referrer=https%3A%2F%2Fwww.canva.com%2F<br>
 Video: https://www.bilibili.com/video/BV18nXjBbEC8/?vd_source=6e5c8626e5747cf39485144316360c17<br>
 
 Game link:https://dyeus-wwww.itch.io/newtons-edge
 
+
+
+-i Nano Banana is used for designing the cards; Codex OpenAI is used for debugging code.

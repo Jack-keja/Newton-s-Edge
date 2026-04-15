@@ -44,11 +44,11 @@ The advantage of our game:
 
 ## What is in the prototype
 
-- Two players start around the center of the stage (`11.8m` and `13.8m` on a `25m` stage).
+- Two players start near the center of the stage (`11.8m` and `13.8m` on a `25m` stage).
 - Each player begins with `5` energy and `2` random cards.
-- At the start of each new turn, the active player gains `2` energy and draws `2` cards.
+- At the start of each turn, the active player gains `2` energy and draws `2` cards.
 - Players can play any number of effect cards, then one action card.
-- Force cards resolve with a short physics simulation using:
+- Force cards are resolved through a short physics simulation using:
   - mass = `50kg`
   - gravity = `10m/s^2`
   - friction starts at `0.2`

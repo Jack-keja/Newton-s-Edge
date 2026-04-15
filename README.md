@@ -1,17 +1,16 @@
 # Newton's Edge
 
 The purpose of our game:<br>
-- One of our team memebers (Dior) finds difficulties of learning abstract physics concepts while he was preparing the AP Physics C: Mechanics, and he was not alone in this situation.<br>
-- Therefore, we are creating a interactive game to help them learning abstract physics concepts with detailed animation<br>
+- One of our team members, Dior, experienced significant difficulty learning abstract physics concepts while preparing for the AP Physics C: Mechanics exam. He soon realized he was not alone in this struggle.
+- Consequently, we are developing an interactive game designed to help students master these abstract concepts through detailed, high-quality animations.<br>
 
 Why Card Games?<br>
-- Card can present the ideas and concept through multimedia and provides the strategy point of view of the game.
+- Cards can effectively present ideas and concepts through multimedia elements while incorporating a strategic layer into the gameplay.
 
 The advantage of our game:
-- easy access (small app, simple instruction, play immediately)
-- simple rules (easy for new-comers to play the game)
-- displaying the replay of the actions to present detailed animation on abstract physics concepts
-
+- Easy Access: A lightweight app with simple instructions that allows players to start immediately.
+- Simple Rules: Intuitive mechanics that make it easy for newcomers to pick up the game.
+- Visual Learning: Action replays that provide detailed animations to help visualize and clarify abstract physics concepts.
 
 ## Game Design
 
